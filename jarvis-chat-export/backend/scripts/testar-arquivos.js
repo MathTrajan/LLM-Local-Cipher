@@ -1,17 +1,26 @@
 /**
  * Smoke test da sandbox de arquivos.
  *
- * Aponta JARVIS_ARQUIVOS_RAIZ para /tmp ANTES de carregar arquivos.js: o modulo
- * le a raiz uma vez, na importacao. Por isso a pasta real do usuario nunca e
- * tocada por este script.
+ * Aponta JARVIS_ARQUIVOS_RAIZ e JARVIS_LIXEIRA para /tmp ANTES de carregar
+ * arquivos.js: o modulo le as duas uma vez, na importacao. Por isso a pasta real
+ * do usuario nunca e tocada por este script.
+ *
+ * ⚠️ A lixeira tambem precisa ser redirecionada, e isto ja foi um defeito: a
+ * assercao da Lixeira usava `~/.Trash` cravado, entao cada `npm run testar`
+ * depositava lixo na Lixeira DE VERDADE (contrariando o paragrafo acima) e, pior,
+ * quebrava quando JARVIS_LIXEIRA estava definida no ambiente — que e o caso em
+ * producao. Como os 47 casos sao portao do deploy, isso barraria a publicacao com
+ * uma mensagem que nao diz nada sobre a variavel.
  *
  * Rodar: npm run testar
  */
 process.env.JARVIS_ARQUIVOS_RAIZ = "/tmp/jarvis-sandbox-teste";
+process.env.JARVIS_LIXEIRA = "/tmp/jarvis-lixeira-teste";
 
 const fs = require("fs");
 const path = require("path");
 fs.rmSync("/tmp/jarvis-sandbox-teste", { recursive: true, force: true });
+fs.rmSync("/tmp/jarvis-lixeira-teste", { recursive: true, force: true });
 
 const a = require("../arquivos.js");
 
@@ -48,7 +57,12 @@ async function recusa(nome, fn, codigoEsperado) {
   console.log("\n== extensao e tamanho ==");
   await recusa("extensao proibida", () => a.executarFerramenta("criar_arquivo", { caminho: "virus.exe", conteudo: "x" }), "EXTENSAO_NAO_PERMITIDA");
   await recusa("sem extensao", () => a.executarFerramenta("criar_arquivo", { caminho: "semext", conteudo: "x" }), "EXTENSAO_NAO_PERMITIDA");
-  await recusa("grande demais", () => a.executarFerramenta("criar_arquivo", { caminho: "g.md", conteudo: "x".repeat(600 * 1024) }), "GRANDE_DEMAIS");
+  // ⚠️ Deriva do teto real em vez de cravar um numero. A versao anterior usava
+  // 600 KB contra o teto de 512 KB; quando o teto subiu para 1 MB (2026-11-01,
+  // para caber o maior .jrxml da empresa) o caso passou a FALHAR em silencio
+  // conceitual: o arquivo cabia e o teste esperava recusa. Com `a.MAX_BYTES` o
+  // caso acompanha qualquer mudanca futura do limite.
+  await recusa("grande demais", () => a.executarFerramenta("criar_arquivo", { caminho: "g.md", conteudo: "x".repeat(a.MAX_BYTES + 1024) }), "GRANDE_DEMAIS");
 
   console.log("\n== caminho feliz ==");
   const criado = await a.executarFerramenta("criar_arquivo", { caminho: "notas/reuniao.md", conteudo: "# Reuniao\nlinha um" });
@@ -74,9 +88,9 @@ async function recusa(nome, fn, codigoEsperado) {
   const apagado = await a.executarFerramenta("apagar_arquivo", { caminho: "notas/reuniao.md" });
   ok("sumiu da sandbox", !fs.existsSync(path.join(a.RAIZ, "notas/reuniao.md")));
   ok("foi para a Lixeira", apagado.destino === "Lixeira");
-  // Nao da para listar ~/.Trash aqui (o macOS exige permissao TCC para esse
-  // diretorio), entao a prova e indireta: o rename nao lancou e o arquivo sumiu.
-  ok("existe no destino da Lixeira", fs.existsSync(path.join(require("os").homedir(), ".Trash", "reuniao.md")));
+  // Com a lixeira redirecionada para /tmp a prova e direta: antes era indireta
+  // porque o macOS exige permissao TCC para listar ~/.Trash.
+  ok("existe no destino da Lixeira", fs.existsSync(path.join(a.LIXEIRA, "reuniao.md")));
   await recusa("apagar a raiz", () => a.executarFerramenta("apagar_arquivo", { caminho: "." }), "FORA_DA_RAIZ");
 
   console.log("\n== ferramenta desconhecida ==");

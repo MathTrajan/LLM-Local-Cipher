@@ -21,6 +21,8 @@ const fsp = require("fs/promises");
 const os = require("os");
 const path = require("path");
 const { getEnvString } = require("./config");
+const jrxml = require("./jrxml");
+const montadorA2O = require("./montador-a2o");
 
 /** Expande ~ no comeco do caminho, como o shell faz. */
 function expandirTil(valor) {
@@ -34,15 +36,41 @@ const RAIZ = path.resolve(
   expandirTil(getEnvString("JARVIS_ARQUIVOS_RAIZ") || path.join(os.homedir(), "Jarvis-Arquivos"))
 );
 
+/**
+ * Onde o apagar_arquivo deposita o que foi removido. O padrao e a Lixeira do
+ * macOS, que e o caso desta maquina.
+ *
+ * ⚠️ Configuravel por causa do Debian do Sentinel: ali `~/.Trash` nao existe (o
+ * servidor nao tem interface grafica) e a unit roda com `ProtectHome=read-only`,
+ * entao o rename falharia com FALHA_AO_APAGAR e o apagar viraria um recurso
+ * quebrado em producao. La a variavel aponta para /opt/jarvis-lixeira.
+ *
+ * ⚠️ Tem de ficar no MESMO volume da raiz: `rename` nao atravessa sistema de
+ * arquivos. Pasta em outro disco (ou em tmpfs) faz todo apagar falhar.
+ */
+const LIXEIRA = path.resolve(
+  expandirTil(getEnvString("JARVIS_LIXEIRA") || path.join(os.homedir(), ".Trash"))
+);
+
 // Só texto. Sem binario, sem .app, sem nada que o macOS trate como executavel.
 // O modelo pode escrever codigo (.js, .py, .sh) porque o Jarvis nunca o executa —
 // o arquivo fica parado ate voce abrir.
 const EXTENSOES = new Set([
   ".md", ".txt", ".json", ".csv", ".tsv", ".log", ".yml", ".yaml",
   ".html", ".css", ".js", ".ts", ".jsx", ".tsx", ".py", ".sh", ".sql", ".xml", ".env",
+  // .jrxml entrou em 2026-11-01, para o Jarvis gerar relatorio do JasperReports.
+  // E XML puro, nao executa nada, e o Jarvis so grava texto: mesmo risco do .xml
+  // que ja estava aqui. Sem esta linha o modelo gera o conteudo certo e a
+  // sandbox recusa gravar com EXTENSAO_NAO_PERMITIDA, que e um erro confuso
+  // porque o problema nao esta no que ele escreveu.
+  ".jrxml",
 ]);
 
-const MAX_BYTES = 512 * 1024;      // teto por arquivo: 512 KB
+/* Teto por arquivo. Subiu de 512 KB para 1 MB em 2026-11-01: o maior .jrxml da
+   empresa tem 768 KB e seria recusado no upload, que e justamente o arquivo que
+   mais precisa ser migrado para o padrao. E texto puro e a sandbox nao executa
+   nada, entao o risco de dobrar o teto e de disco, nao de seguranca. */
+const MAX_BYTES = 1024 * 1024;
 const MAX_ITENS_LISTAGEM = 200;
 const MAX_CHARS_LEITURA = 20000;   // o contexto do 3B e 4096 tokens
 
@@ -57,6 +85,17 @@ class ErroArquivo extends Error {
     super(mensagem);
     this.name = "ErroArquivo";
     this.codigo = codigo;
+  }
+}
+
+/** Diz se um caminho existe DENTRO da raiz. Usado pelo upload para decidir
+    entre criar e substituir sem vazar mensagem interna para a tela. */
+async function existeCaminho(caminho) {
+  try {
+    await fsp.stat(resolverSeguro(caminho));
+    return true;
+  } catch (_) {
+    return false;
   }
 }
 
@@ -135,6 +174,45 @@ function validarTamanho(conteudo) {
   }
 }
 
+/**
+ * Tira a cerca de markdown que o modelo poe em volta do codigo.
+ *
+ * ⚠️ Medido em 2026-11-01: ao propor `criar_arquivo` com um script Python, o 3B
+ * devolve o conteudo como "```python\n...\n```". O arquivo e gravado COM as
+ * cercas e nao roda, e o erro que o Python mostra ("invalid syntax" na linha 1)
+ * nao tem relacao obvia com a causa.
+ *
+ * So remove quando a cerca envolve o conteudo INTEIRO. Bloco de codigo no meio
+ * de um .md e legitimo e fica intacto.
+ */
+function limparCercaDeCodigo(conteudo) {
+  const texto = String(conteudo ?? "");
+  const m = texto.match(/^\s*```[a-zA-Z0-9_-]*\r?\n([\s\S]*?)\r?\n?```\s*$/);
+  return m ? m[1] : texto;
+}
+
+/**
+ * Validacao especifica por tipo de arquivo, antes de gravar.
+ *
+ * ⚠️ Roda no CRIAR e no EDITAR, e nao so no criar: o caminho mais comum de um
+ * .jrxml quebrar e o modelo editar um arquivo que estava bom. Validar so na
+ * criacao daria a falsa sensacao de que o arquivo no disco esta sempre valido.
+ *
+ * Hoje so .jrxml tem regra. O resto passa direto: a sandbox nunca pretendeu ser
+ * linter de linguagem, e validar .js ou .py exigiria parser por linguagem.
+ */
+function validarConteudoPorTipo(alvo, conteudo, { padraoA2O = false } = {}) {
+  if (path.extname(alvo).toLowerCase() !== ".jrxml") return;
+  try {
+    jrxml.validar(conteudo, { padraoA2O });
+  } catch (erro) {
+    // Converte para ErroArquivo: o server.js responde 400 com a mensagem para
+    // erro conhecido e 500 generico para o resto. A lista de problemas tem de
+    // chegar ao usuario, senao ele nao sabe o que pedir para corrigir.
+    throw new ErroArquivo(erro.message, "JRXML_INVALIDO");
+  }
+}
+
 function relativo(alvo) {
   return path.relative(RAIZ, alvo) || ".";
 }
@@ -171,6 +249,30 @@ async function lerArquivo({ caminho } = {}) {
     if (erro.code === "EISDIR") throw new ErroArquivo("Isso e uma pasta, nao um arquivo.", "E_PASTA");
     throw erro;
   }
+  /* ⚠️ .jrxml grande vira ESPECIFICACAO, nao XML truncado.
+     Medido em 2026-11-01 nos 175 arquivos da empresa: a media tem 17 mil tokens
+     e o contexto do modelo e de 8.192. Devolver os primeiros 20 mil caracteres
+     seria pior que inutil: o modelo veria o cabecalho e metade das bandas, nao
+     saberia que falta o resto, e completaria inventando.
+     O resumo entrega o contrato (parametros, campos), o inventario (rotulos e
+     expressoes por secao) e a lista do que corrigir ao migrar, em ~1.400 tokens
+     para um arquivo de 54 KB: 92% menos. O layout antigo NAO vem de proposito,
+     porque o objetivo e refazer no padrao A2O. */
+  const ehJrxmlGrande =
+    path.extname(alvo).toLowerCase() === ".jrxml" && conteudo.length > MAX_CHARS_LEITURA;
+  if (ehJrxmlGrande) {
+    return {
+      caminho: relativo(alvo),
+      conteudo: jrxml.resumir(conteudo),
+      resumido: true,
+      truncado: false,
+      aviso:
+        `Arquivo de ${Math.round(conteudo.length / 1024)} KB, grande demais para o contexto. ` +
+        `Acima esta a ESPECIFICACAO extraida (contrato, secoes e o que corrigir), nao o XML. ` +
+        `Use isso para escrever o gerador Python com o _ficha.py.`,
+    };
+  }
+
   const truncado = conteudo.length > MAX_CHARS_LEITURA;
   return {
     caminho: relativo(alvo),
@@ -179,12 +281,14 @@ async function lerArquivo({ caminho } = {}) {
   };
 }
 
-async function criarArquivo({ caminho, conteudo = "" } = {}) {
+async function criarArquivo({ caminho, conteudo = "", ...opcoes } = {}) {
   garantirRaiz();
+  conteudo = limparCercaDeCodigo(conteudo);
   const alvo = resolverSeguro(caminho);
   recusarSeForIndice(alvo);
   validarExtensao(alvo);
   validarTamanho(conteudo);
+  validarConteudoPorTipo(alvo, conteudo, { padraoA2O: opcoes.padraoA2O !== false });
 
   await fsp.mkdir(path.dirname(alvo), { recursive: true });
   try {
@@ -199,12 +303,20 @@ async function criarArquivo({ caminho, conteudo = "" } = {}) {
   return { caminho: relativo(alvo), bytes: Buffer.byteLength(String(conteudo), "utf8") };
 }
 
-async function editarArquivo({ caminho, conteudo = "" } = {}) {
+async function editarArquivo({ caminho, conteudo = "", ...opcoes } = {}) {
   garantirRaiz();
+  conteudo = limparCercaDeCodigo(conteudo);
   const alvo = resolverSeguro(caminho);
   recusarSeForIndice(alvo);
   validarExtensao(alvo);
   validarTamanho(conteudo);
+  /* ⚠️ Esta linha FALTAVA e o buraco era real, nao teorico: em 2026-11-01 o
+     modelo propos substituir um .jrxml pelo SCRIPT PYTHON que deveria gera-lo,
+     o usuario confirmou e o arquivo foi sobrescrito. A validacao existia so no
+     criarArquivo, e editar e justamente o caminho perigoso, porque destroi
+     conteudo que ja estava certo. O backup em .backups/ salvou o original, mas
+     a guarda tem de impedir antes. */
+  validarConteudoPorTipo(alvo, conteudo, { padraoA2O: opcoes.padraoA2O !== false });
 
   let anterior = null;
   try {
@@ -246,11 +358,24 @@ async function apagarArquivo({ caminho } = {}) {
     throw erro;
   }
 
-  const lixeira = path.join(os.homedir(), ".Trash");
-  let destino = path.join(lixeira, path.basename(alvo));
+  // No macOS a Lixeira sempre existe; no Debian do servidor a pasta e nossa e
+  // pode nao existir ainda. Idempotente.
+  //
+  // ⚠️ Dentro do try: com JARVIS_LIXEIRA ausente o default cai em ~/.Trash, e a
+  // unit roda com ProtectHome=true, entao o mkdir lanca EPERM cru. Fora do try
+  // isso saia como 500 "Nao consegui concluir a acao", que nao diz nada; aqui
+  // vira FALHA_AO_APAGAR com o motivo real na mensagem.
+  const nome = path.basename(alvo);
+  let destino;
+  try {
+    fs.mkdirSync(LIXEIRA, { recursive: true });
+  } catch (erro) {
+    throw new ErroArquivo(`Nao consegui preparar a Lixeira (${LIXEIRA}): ${erro.message}`, "FALHA_AO_APAGAR");
+  }
+  destino = path.join(LIXEIRA, nome);
   if (fs.existsSync(destino)) {
     const carimbo = new Date().toISOString().replace(/[:.]/g, "-");
-    destino = path.join(lixeira, `${path.basename(alvo)}.${carimbo}`);
+    destino = path.join(LIXEIRA, `${nome}.${carimbo}`);
   }
   try {
     await fsp.rename(alvo, destino);
@@ -405,7 +530,330 @@ async function atualizarIndices(caminhoRelativo) {
 // FERRAMENTAS EXPOSTAS AO MODELO
 // ─────────────────────────────────────────────────────────────
 
+/**
+ * Gera um .jrxml COMPLETO no padrao A2O a partir de uma especificacao.
+ *
+ * ⚠️ O modelo NAO escreve o XML aqui: ele descreve o relatorio e o
+ * montador-a2o.js produz o arquivo. Essa divisao e o que torna o resultado
+ * confiavel. Nas quatro rodadas de treino de 2026-11-01 o 3B acertou a forma e
+ * errou o conteudo quando escrevia codigo; descrevendo dados ele acerta,
+ * porque e a tarefa em que modelo pequeno e bom.
+ *
+ * O arquivo sai pronto para baixar e testar no servidor.
+ */
+/**
+ * Extrai parametros e campos de um .jrxml existente, para o novo herdar o
+ * contrato sem o modelo precisar transcrever nada.
+ */
+async function contratoDe(caminho) {
+  const alvo = resolverSeguro(caminho);
+  const xml = await fsp.readFile(alvo, "utf8");
+  const parametros = [...xml.matchAll(/<parameter name="([^"]+)"[^>]*class="([^"]+)"/g)]
+    .map((m) => ({ nome: m[1], classe: m[2] }));
+  const campos = [...xml.matchAll(/<field name="([^"]+)"[^>]*class="([^"]+)"/g)]
+    .map((m) => ({ nome: m[1], classe: m[2] }));
+  // Dedup por nome: subDataset repete parametro, e nome duplicado quebra a
+  // compilacao com "Duplicate declaration".
+  const unico = (lista) => [...new Map(lista.map((x) => [x.nome, x])).values()];
+  return { parametros: unico(parametros), campos: unico(campos) };
+}
+
+async function gerarRelatorioA2O(spec = {}) {
+  garantirRaiz();
+
+  /* ⚠️ `herdarDe` copia o contrato do arquivo original automaticamente.
+     Sem isto o modelo tinha de transcrever 17 parametros e 61 campos na
+     chamada da ferramenta, e medido em 2026-11-01 ele simplesmente NAO
+     transcreveu: o .jrxml saiu com 0 field e 0 parameter, bonito e inutil,
+     porque sem os campos o sistema nao tem o que preencher.
+     Transcricao longa e justamente o que um modelo pequeno erra; leitura de
+     arquivo e deterministica. */
+  /* ⚠️ `saida` nunca pode ser igual a `herdarDe`: seria sobrescrever o arquivo
+     original pelo que deveria ser a versao nova dele. O modelo propos isso em
+     2026-11-03, pedindo saida e herdarDe ambos como pessoa_imprimir_3.jrxml. */
+  if (spec.herdarDe && path.basename(String(spec.saida || "")) === path.basename(String(spec.herdarDe))) {
+    throw new ErroArquivo(
+      `A saida "${spec.saida}" e o mesmo arquivo de origem. Escolha outro nome, ` +
+        `senao o original e destruido.`,
+      "SAIDA_IGUAL_ORIGEM"
+    );
+  }
+
+  /* ⚠️ `herdarDe` apontando para arquivo que NAO EXISTE quase sempre significa
+     que o modelo copiou o nome do exemplo do manual. Aconteceu em 2026-11-03:
+     pediram `pessoa_imprimir_3.jrxml` e ele mandou `herdarDe:
+     "nfs-listagem.jrxml"`, que e o nome literal do exemplo. O relatorio sairia
+     com os 61 campos de nota fiscal no lugar dos de pessoa, e nada acusaria:
+     o arquivo e valido, so esta errado.
+     Em vez de confiar, confere se existe; nao existindo, cai no palpite pelo
+     mais recente, que e o fluxo real de "subi o arquivo e pedi a versao nova". */
+  if (spec.herdarDe && !(await existeCaminho(spec.herdarDe))) {
+    console.warn(`[a2o] herdarDe "${spec.herdarDe}" nao existe; vou procurar o .jrxml mais recente`);
+    spec = { ...spec, herdarDe: null };
+  }
+
+  if (spec.herdarDe) {
+    try {
+      const herdado = await contratoDe(spec.herdarDe);
+      spec = {
+        ...spec,
+        parametros: (spec.parametros?.length ? spec.parametros : herdado.parametros),
+        campos: (spec.campos?.length ? spec.campos : herdado.campos),
+      };
+    } catch (erro) {
+      throw new ErroArquivo(
+        `Nao consegui ler o contrato de "${spec.herdarDe}": ${erro.message}`,
+        "HERDAR_FALHOU"
+      );
+    }
+  }
+
+  /* ⚠️ A validacao de COLUNAS vem antes da de campos. Com a ordem invertida,
+     um pedido de 18 colunas era recusado com SEM_CAMPOS, mandando corrigir o
+     contrato quando o problema era a tabela larga demais. Mensagem errada faz
+     o modelo consertar a coisa errada e tentar de novo igual. */
+  if (!Array.isArray(spec.colunas) || spec.colunas.length === 0) {
+    throw new ErroArquivo("Informe ao menos uma coluna, com titulo e campo.", "SEM_COLUNAS");
+  }
+
+  /* ⚠️ Teto de colunas, porque largura normalizada nao salva layout ilegivel.
+     Em 2026-11-03 o modelo propos 18 colunas em A4 retrato para uma ficha
+     cadastral: cada uma ficaria com ~30 pontos, menos que o necessario para
+     escrever "Razao Social". O numero vem da conta: com F_TEXTO em 7pt cabem
+     ~6 caracteres por 30 pontos.
+     Acima de 8 colunas, paisagem passa a ser obrigatoria (802 em vez de 555).
+     Acima de 14, nem paisagem resolve e o pedido e recusado com orientacao:
+     ficha cadastral quer campos empilhados, nao tabela larga. */
+  if (spec.colunas.length > 14) {
+    throw new ErroArquivo(
+      `${spec.colunas.length} colunas nao cabem numa tabela legivel (teto 14). ` +
+        `Se isto e uma ficha cadastral e nao uma listagem, ela precisa de campos ` +
+        `empilhados, que o montador nao faz: use o _ficha.py. Para listagem, ` +
+        `escolha as colunas que importam.`,
+      "COLUNAS_DEMAIS"
+    );
+  }
+  if (spec.colunas.length > 8 && spec.paisagem !== true) {
+    console.log(`[a2o] ${spec.colunas.length} colunas: forcando paisagem`);
+    spec = { ...spec, paisagem: true };
+  }
+
+  /* ⚠️ Ultimo recurso: herdar do .jrxml mais recente da sandbox.
+     O modelo esquece `herdarDe` com frequencia (medido em 2026-11-01: acertou
+     numa chamada e esqueceu na seguinte, com o mesmo pedido). Quando isso
+     acontece a geracao falha e o usuario ve um erro tecnico, mesmo tendo
+     acabado de subir o arquivo de origem.
+     Como o fluxo real e "subo um arquivo, peco a versao nova", o .jrxml mais
+     recente que NAO e a saida e quase sempre a origem certa. O palpite vai
+     declarado no resultado, para o usuario poder desmentir. */
+  /* ⚠️ Campos informados a mao SAO SUSPEITOS numa migracao. Medido em
+     2026-11-03: o modelo mandou 2 campos para um relatorio cujo original tem 61,
+     e o arquivo saiu valido e inutil (o sistema preenche por nome; 59 campos
+     ausentes = 59 colunas vazias).
+     Quando ha menos de 5 campos informados E existe .jrxml na pasta, o contrato
+     do arquivo vale mais que a lista do modelo: transcrever 61 nomes e
+     justamente o que um modelo pequeno nao faz. */
+  if (!spec.herdarDe && (spec.campos || []).length > 0 && spec.campos.length < 5) {
+    console.warn(`[a2o] so ${spec.campos.length} campos informados; vou herdar do .jrxml mais recente`);
+    spec = { ...spec, campos: [], parametros: [] };
+  }
+
+  let herdouPorPalpite = null;
+  if (!(spec.campos || []).length && !spec.herdarDe) {
+    try {
+      const saidaNome = path.basename(String(spec.saida || ""));
+      const entradas = await fsp.readdir(RAIZ, { withFileTypes: true });
+      const candidatos = [];
+      for (const e of entradas) {
+        if (!e.isFile() || !e.name.toLowerCase().endsWith(".jrxml")) continue;
+        if (e.name === saidaNome) continue;
+        const caminho = path.join(RAIZ, e.name);
+        const st = await fsp.stat(caminho);
+        /* Pula o que o proprio montador gerou: nao e fonte de contrato, e usar
+           como tal propaga um contrato ja reduzido. O marcador e inserido pelo
+           montador-a2o.js. */
+        const cabeca = (await fsp.readFile(caminho, "utf8")).slice(0, 4000);
+        if (cabeca.includes("jarvis-montador-a2o")) continue;
+        candidatos.push({ nome: e.name, mtime: st.mtimeMs });
+      }
+      candidatos.sort((a, b) => b.mtime - a.mtime);
+      if (candidatos.length) {
+        const herdado = await contratoDe(candidatos[0].nome);
+        if (herdado.campos.length) {
+          spec = { ...spec, parametros: herdado.parametros, campos: herdado.campos };
+          herdouPorPalpite = candidatos[0].nome;
+        }
+      }
+    } catch (_) {
+      // Palpite e melhor esforco: falhando, cai na recusa abaixo.
+    }
+  }
+
+  /* Relatorio sem campo nenhum nao emite nada. Recusar aqui e melhor que
+     entregar um arquivo que so falha no servidor do cliente. */
+  if (!(spec.campos || []).length) {
+    throw new ErroArquivo(
+      "O relatorio ficaria sem nenhum <field> e nao emitiria nada. " +
+        "Passe `herdarDe` com o arquivo original, ou informe os campos.",
+      "SEM_CAMPOS"
+    );
+  }
+
+  const saida = String(spec.saida || "").trim();
+  if (!saida) throw new ErroArquivo("Informe o nome do arquivo de saida (.jrxml).", "SEM_SAIDA");
+  if (!saida.toLowerCase().endsWith(".jrxml")) {
+    throw new ErroArquivo("A saida precisa terminar em .jrxml.", "EXTENSAO_NAO_PERMITIDA");
+  }
+  const xml = montadorA2O.montar(spec);
+
+  /* Valida a propria saida antes de gravar. O montador e deterministico, mas a
+     checagem custa milissegundos e transforma um bug futuro dele em erro na
+     hora, em vez de arquivo quebrado descoberto na emissao. */
+  jrxml.validar(xml, { padraoA2O: true });
+
+  const alvo = resolverSeguro(saida);
+  await fsp.mkdir(path.dirname(alvo), { recursive: true });
+  await fsp.writeFile(alvo, xml, "utf8");
+  return {
+    caminho: relativo(alvo),
+    bytes: Buffer.byteLength(xml, "utf8"),
+    colunas: spec.colunas.length,
+    campos: (spec.campos || []).length,
+    ...(herdouPorPalpite
+      ? { aviso: `O contrato foi herdado de "${herdouPorPalpite}", o .jrxml mais recente da pasta. Se nao era esse, peca de novo informando herdarDe.` }
+      : {}),
+  };
+}
+
 const FERRAMENTAS = {
+  gerar_relatorio_a2o: {
+    executar: gerarRelatorioA2O,
+    destrutiva: false,
+    escreve: true,
+    resumo: (a) => {
+      const extras = [];
+      if ((a.kpis || []).length) extras.push(`${a.kpis.length} KPI`);
+      if ((a.totais || []).length) extras.push("totais");
+      if (a.agruparPor) extras.push(`agrupado por ${a.agruparPor}`);
+      if (a.grafico) extras.push(`grafico de ${a.grafico.tipo}`);
+      return `Gerar "${a.saida}" no padrao A2O (${(a.colunas || []).length} colunas`
+        + (extras.length ? `, ${extras.join(", ")}` : "") + ")";
+    },
+    schema: {
+      type: "function",
+      function: {
+        name: "gerar_relatorio_a2o",
+        description:
+          "Gera um arquivo .jrxml completo no padrao visual da A2O (cabecalho com logo e dados da filial, " +
+          "faixa azul #415F83 nas colunas, linha zebrada, rodape com emissao e pagina). " +
+          "Use SEMPRE esta ferramenta para criar relatorio A2O: nunca escreva XML a mao.",
+        parameters: {
+          type: "object",
+          properties: {
+            saida: { type: "string", description: "Nome do arquivo a gerar, terminando em .jrxml" },
+            herdarDe: {
+              type: "string",
+              description:
+                "Nome do .jrxml ORIGINAL. O sistema copia dele todos os parametros e campos " +
+                "automaticamente. Use SEMPRE que estiver migrando um relatorio existente: " +
+                "assim voce nao precisa transcrever a lista.",
+            },
+            nome: { type: "string", description: "Nome interno do relatorio, sem espaco" },
+            titulo: { type: "string", description: "Rotulo pequeno do cabecalho, ex: LISTAGEM" },
+            subtitulo: { type: "string", description: "Titulo principal, ex: Notas Fiscais de Servico" },
+            paisagem: { type: "boolean", description: "true para A4 paisagem" },
+            rodape: { type: "string", description: "Texto do rodape" },
+            parametros: {
+              type: "array",
+              description: "So quando NAO usar herdarDe. Parametros com nome e classe exatos",
+              items: {
+                type: "object",
+                properties: { nome: { type: "string" }, classe: { type: "string" } },
+                required: ["nome"],
+              },
+            },
+            campos: {
+              type: "array",
+              description: "So quando NAO usar herdarDe. Campos com nome e classe exatos",
+              items: {
+                type: "object",
+                properties: { nome: { type: "string" }, classe: { type: "string" } },
+                required: ["nome"],
+              },
+            },
+            kpis: {
+              type: "array",
+              description:
+                "Cartoes de indicador no fim do relatorio. Use quando o pedido falar em KPI, " +
+                "indicador, resumo, total geral ou painel.",
+              items: {
+                type: "object",
+                properties: {
+                  rotulo: { type: "string", description: "Texto do cartao, ex: Total faturado" },
+                  campo: { type: "string", description: "Campo somado ou contado, sem $F{}" },
+                  calculo: { type: "string", enum: ["Sum", "Count", "Average", "Highest", "Lowest"] },
+                  al: { type: "string", enum: ["Left", "Center", "Right"] },
+                },
+                required: ["rotulo", "campo"],
+              },
+            },
+            totais: {
+              type: "array",
+              description:
+                "Totais no rodape da tabela, alinhados com as colunas. Use quando pedirem " +
+                "somatorio, total por coluna ou fechamento.",
+              items: {
+                type: "object",
+                properties: {
+                  coluna: { type: "string", description: "Mesmo nome de campo usado na coluna" },
+                  calculo: { type: "string", enum: ["Sum", "Count", "Average"] },
+                },
+                required: ["coluna"],
+              },
+            },
+            agruparPor: {
+              type: "string",
+              description:
+                "Campo que agrupa as linhas. Cria faixa de cabecalho por valor e, se houver " +
+                "totais, subtotal por grupo. O sistema ordena pelo campo sozinho.",
+            },
+            grafico: {
+              type: "object",
+              description: "Grafico no fim do relatorio. Use quando pedirem grafico ou visualizacao.",
+              properties: {
+                tipo: { type: "string", enum: ["barras", "pizza"] },
+                titulo: { type: "string" },
+                categoria: { type: "string", description: "Campo do eixo de categoria, sem $F{}" },
+                valor: { type: "string", description: "Campo do valor, sem $F{}" },
+                altura: { type: "number", description: "Altura em pontos, padrao 180" },
+              },
+              required: ["tipo", "categoria", "valor"],
+            },
+            colunas: {
+              type: "array",
+              description: "Colunas da tabela, na ordem em que aparecem",
+              items: {
+                type: "object",
+                properties: {
+                  titulo: { type: "string", description: "Cabecalho da coluna" },
+                  campo: { type: "string", description: "Nome do campo, sem $F{}" },
+                  largura: { type: "number", description: "Peso relativo da largura" },
+                  formato: {
+                    type: "string",
+                    enum: ["texto", "data", "datahora", "numero", "inteiro", "dinheiro", "simnao"],
+                  },
+                  al: { type: "string", enum: ["Left", "Center", "Right"] },
+                },
+                required: ["titulo", "campo"],
+              },
+            },
+          },
+          required: ["saida", "subtitulo", "colunas"],
+        },
+      },
+    },
+  },
+
   listar_pasta: {
     executar: listarPasta,
     destrutiva: false,
@@ -613,6 +1061,11 @@ async function executarFerramenta(nome, args = {}) {
 
 module.exports = {
   RAIZ,
+  existeCaminho,
+  LIXEIRA,
+  // Exportado para o smoke test derivar o caso de "grande demais" do teto
+  // real, em vez de cravar um numero que envelhece quando o limite muda.
+  MAX_BYTES,
   NOME_INDICE,
   garantirRaiz,
   atualizarIndices,
