@@ -20,13 +20,17 @@
 
 const path = require("path");
 
-// A sandbox precisa existir antes do require: arquivos.js le a raiz no carregamento.
-process.env.JARVIS_ARQUIVOS_RAIZ =
-  process.env.JARVIS_ARQUIVOS_RAIZ || path.join("/tmp", "jarvis-teste-relatorio");
-require("fs").mkdirSync(process.env.JARVIS_ARQUIVOS_RAIZ, { recursive: true });
+// Aponta a raiz para /tmp ANTES de carregar arquivos.js: o modulo le a variavel
+// no carregamento. Mesmo preparo do testar-indice.js.
+process.env.JARVIS_ARQUIVOS_RAIZ = path.join("/tmp", "jarvis-teste-relatorio");
 
+const arquivos = require("../arquivos");
 const jrxml = require("../jrxml");
 const agent = require("../agent");
+
+// `garantirRaiz` e quem sabe criar a raiz, e e idempotente. Criar com mkdirSync
+// aqui faria o estado inicial divergir dos outros dois smoke tests.
+arquivos.garantirRaiz();
 
 let ok = 0;
 let falhas = 0;
@@ -297,6 +301,47 @@ const PEDIDOS_QUE_NAO_DEVEM_FORCAR = [
 
   checar("resposta vazia nao vira aviso",
     agent.avisoDeArquivoNaoGerado({ text: "", toolCalls: [] }) === null);
+
+  /* ─── Sinal ESTRUTURAL: vale mais que a lista de frases ───
+     O pedido era para gerar e nada foi escrito. Nao depende de o modelo
+     escrever a afirmacao de um jeito previsto, que e o ponto fraco de
+     reconhecer intencao por regex. */
+  {
+    const semAfirmar = {
+      text: "Esse relatório agrupa por CFOP e tem 6 colunas visíveis.",
+      toolCalls: [],
+    };
+    checar("pedido de geracao sem escrita avisa mesmo sem o modelo afirmar nada",
+      agent.avisoDeArquivoNaoGerado(semAfirmar, { forcar: true }) !== null);
+    checar("a mensagem do caso estrutural fala de expectativa, nao de contradicao",
+      /O pedido era para produzir um arquivo/.test(
+        agent.avisoDeArquivoNaoGerado(semAfirmar, { forcar: true })));
+    checar("sem pedido de geracao a mesma resposta passa limpa",
+      agent.avisoDeArquivoNaoGerado(semAfirmar, { forcar: false }) === null);
+    checar("com escrita no fim, o sinal estrutural tambem cala",
+      agent.avisoDeArquivoNaoGerado(
+        { ...semAfirmar, toolCalls: [{ nome: "gerar_relatorio_a2o" }] },
+        { forcar: true }
+      ) === null);
+    checar("leitura no fim nao satisfaz o pedido de geracao",
+      agent.avisoDeArquivoNaoGerado(
+        { ...semAfirmar, toolCalls: [{ nome: "ler_arquivo" }] },
+        { forcar: true }
+      ) !== null);
+  }
+  {
+    /* Ficha: o modelo recusa com motivo, e o aviso ainda aparece porque o
+       usuario pediu arquivo e nao tem arquivo. Mas a redacao nao pode
+       desmenti-lo, senao o sistema vira ruido. */
+    const recusaHonesta = {
+      text: "Não gerei o arquivo: isto é ficha cadastral e o montador faz tabela. Use o _ficha.py.",
+      toolCalls: [],
+    };
+    const aviso = agent.avisoDeArquivoNaoGerado(recusaHonesta, { forcar: true });
+    checar("recusa honesta ainda avisa que nao ha arquivo", aviso !== null);
+    checar("recusa honesta nao e acusada de afirmar o que nao fez",
+      !/A resposta acima diz/.test(aviso || ""));
+  }
 
   // ─────────────────────────────────────────────────────────────
   // 5. resolverConversa: a ordem que era o bug

@@ -275,11 +275,25 @@ function desescapar(txt) {
     .replace(/&amp;/g, "&");
 }
 
-/** Conta `<text>` dentro de todas as bandas de um tipo (`detail`, `columnHeader`...). */
+/**
+ * Conta os rotulos de todas as bandas de um tipo (`detail`, `columnHeader`...).
+ *
+ * ⚠️ Usa o MESMO filtro da secao "Secoes" do resumo (`limparExpr` + `desescapar`
+ * + descarta vazio). Contar `<text>` cru daria um numero diferente do que o
+ * resumo mostra duas linhas acima, no mesmo prompt: o modelo leria "columnHeader
+ * com 6 rotulos" na instrucao e um inventario com outra contagem em cima, e nao
+ * tem como saber qual acreditar.
+ */
 function rotulosDaBanda(xml, banda) {
   const re = new RegExp(`<${banda}\\b[\\s\\S]*?</${banda}>`, "g");
-  return [...xml.matchAll(re)]
-    .reduce((n, m) => n + (m[0].match(/<text>/g) || []).length, 0);
+  return [...xml.matchAll(re)].reduce(
+    (n, m) =>
+      n +
+      [...m[0].matchAll(/<text>([\s\S]*?)<\/text>/g)]
+        .map((t) => desescapar(limparExpr(t[1])))
+        .filter(Boolean).length,
+    0
+  );
 }
 
 /**

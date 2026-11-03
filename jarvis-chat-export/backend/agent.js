@@ -157,6 +157,23 @@ function ferramentasPara(options = {}) {
 */
 const CAMINHO_API_FICHA = path.join(__dirname, "data", "api-ficha-a2o.md");
 
+/* ─── Vocabulario do dominio, escrito UMA vez ───
+   ⚠️ Estas palavras estavam copiadas em tres listas de regex com variacoes
+   ligeiras, e a divergencia nao e hipotetica: foi ela que deixou passar o
+   pedido de 2026-11-03. "inserir no relatorio" tinha substantivo numa lista e
+   verbo em nenhuma, e consertar o caso exigiu editar dois lugares diferentes.
+   Sinonimo novo entra aqui e vale nos tres pontos de uso. */
+const COISA = "relat[oó]rio|arquivo|jrxml|listagem|impress[aã]o|layout|coluna|campo|tabela|grupo|vers[aã]o";
+const VERBO_CRIA = "ger(e|ar|a)|cri(e|ar|a)|mont(e|ar|a)|faz(er|a)|produz(a|ir)";
+/* Verbo de EDICAO, que e como o ticket real chega. No fluxo de migracao editar
+   e gerar terminam no mesmo lugar: um arquivo novo no padrao herdando o
+   contrato do antigo. */
+const VERBO_EDITA =
+  "inser(e|ir|a)|inclu(a|ir|i)|adicion(e|ar|a)|acrescent(e|ar|a)|coloc(a|ar|que)|" +
+  "p(oe|õe|or)|ajust(e|ar|a)|alter(e|ar|a)|corrij(a|ir)|corrig(e|ir)|troc(a|ar|he)|" +
+  "atualiz(e|ar|a)|refa(z|zer|ca|ça)|migr(e|ar|a)";
+const SISTEMA = "a2o|cfaweb";
+
 /* Palavras que indicam intencao de mexer em relatorio. Exige UMA de cada lista
    quando a palavra e ambigua: "relatorio" sozinho aparece em conversa comum,
    mas "relatorio jrxml" ou "gerar relatorio A2O" nao. */
@@ -165,9 +182,12 @@ const GATILHOS_RELATORIO = [
   /\bjasper(reports?)?\b/i,
   /\b_ficha\b/i,
   /\bsubrelat[oó]rio\b/i,
-  /\b(relat[oó]rio|impress[aã]o|layout)\b[\s\S]{0,40}\b(a2o|cfaweb|jrxml|jasper)\b/i,
-  /\b(a2o|cfaweb)\b[\s\S]{0,40}\b(relat[oó]rio|impress[aã]o|layout)\b/i,
+  new RegExp(`\\b(${COISA})\\b[\\s\\S]{0,40}\\b(${SISTEMA}|jrxml|jasper)\\b`, "i"),
+  new RegExp(`\\b(${SISTEMA})\\b[\\s\\S]{0,40}\\b(${COISA})\\b`, "i"),
 ];
+
+/** Substantivo do dominio sozinho. Só vale como sinal com um .jrxml na sandbox. */
+const SO_A_COISA = new RegExp(`\\b(${COISA})\\b`, "i");
 
 let manualCache = null;
 let manualMtime = 0;
@@ -198,11 +218,12 @@ function ehSobreRelatorio(mensagem, options = {}) {
      pedido com o arquivo JA na sandbox ficava sem o manual.
      Com um .jrxml disponivel, "relatorio" ou "coluna" ja e sinal bastante: a
      ambiguidade que o gatilho dupla protege nao existe nesse contexto. */
-  const temJrxml = /\.jrxml/i.test(String(options.listagemArquivos || ""));
-  return (
-    temJrxml &&
-    /\b(relat[oó]rio|listagem|impress[aã]o|layout|coluna|campo|tabela|grupo)\b/i.test(texto)
-  );
+  return temJrxmlNaSandbox(options) && SO_A_COISA.test(texto);
+}
+
+/** `true` quando existe .jrxml na sandbox, pelo inventario ja carregado. */
+function temJrxmlNaSandbox(options = {}) {
+  return /\.jrxml/i.test(String(options.listagemArquivos || ""));
 }
 
 /** Devolve options com o manual anexado, quando a mensagem pedir. */
@@ -296,17 +317,13 @@ function mensagemDeLeitura(resultados) {
    ferramenta que ou funciona, ou e recusada pelas guardas com motivo.
 */
 const PEDE_GERACAO = [
-  /\b(ger(e|ar|a)|cri(e|ar|a)|mont(e|ar|a)|faz(er|a)|produz(a|ir))\b[\s\S]{0,60}\b(relat[oó]rio|arquivo|jrxml|listagem|vers[aã]o)\b/i,
-  /* ⚠️ Verbo de EDICAO, e nao de criacao, e como o ticket real chega. Medido em
-     2026-11-03 com um pedido do cliente: "Por favor inserir no relatorio G os
-     tomadores" nao casava com nenhum padrao desta lista, a ferramenta nao foi
-     forcada e o modelo respondeu em texto dizendo ter gerado um arquivo que
-     nunca existiu. A guarda existia desde a manha e passou ao lado do caso que
-     ela foi feita para pegar, porque so previa "gere" e "crie".
-     Quem usa o sistema nao pede "gere um relatorio": pede para inserir uma
-     coluna no que ja existe. No fluxo de migracao as duas coisas terminam no
-     mesmo lugar, que e um arquivo novo no padrao A2O herdando o contrato. */
-  /\b(inser(e|ir|a)|inclu(a|ir|i)|adicion(e|ar|a)|acrescent(e|ar|a)|coloc(a|ar|que)|p(oe|õe|or)|ajust(e|ar|a)|alter(e|ar|a)|corrij(a|ir)|corrig(e|ir)|troc(a|ar|he)|atualiz(e|ar|a)|refa(z|zer|ca|ça)|migr(e|ar|a))\b[\s\S]{0,80}\b(relat[oó]rio|arquivo|jrxml|listagem|coluna|campo|tabela|grupo)\b/i,
+  /* ⚠️ Verbo de EDICAO conta igual a verbo de criacao. Medido em 2026-11-03 com
+     um pedido do cliente: "Por favor inserir no relatorio G os tomadores" nao
+     casava com nada desta lista, a ferramenta nao foi forcada e o modelo
+     respondeu em texto dizendo ter gerado um arquivo que nunca existiu. A
+     guarda existia desde a manha e passou ao lado do caso que ela foi feita
+     para pegar, porque so previa "gere" e "crie". */
+  new RegExp(`\\b(${VERBO_CRIA}|${VERBO_EDITA})\\b[\\s\\S]{0,80}\\b(${COISA})\\b`, "i"),
   /\b(no |nos |em )?padr(ao|ão)\s+a2o\b/i,
   /\bprofissionaliz/i,
   /\bpront[oa] para (baixar|download|testar)\b/i,
@@ -322,11 +339,9 @@ async function devoForcarGeracao(mensagem, options) {
   if (!ferramentasPara(options).length) return false;
   if (!PEDE_GERACAO.some((re) => re.test(String(mensagem || "")))) return false;
   // Reusa o inventario que o prompt ja carregou; so varre o disco sem ele.
-  if (options.listagemArquivos) {
-    return /\.jrxml/i.test(String(options.listagemArquivos));
-  }
+  if (options.listagemArquivos) return temJrxmlNaSandbox(options);
   try {
-    return /\.jrxml/i.test(String(await arquivos.arvoreResumida()));
+    return temJrxmlNaSandbox({ listagemArquivos: await arquivos.arvoreResumida() });
   } catch (_) {
     return false;
   }
@@ -359,39 +374,65 @@ const AFIRMA_ARQUIVO_PRONTO = [
 /** Palavras que invertem o sentido da afirmacao. */
 const NEGACAO = /\b(n[aã]o|nenhum|nenhuma|sem|nada|impossivel|impossível)\b/i;
 
+/** `true` quando o texto afirma, sem negar, ter produzido um arquivo. */
+function afirmaTerGerado(texto) {
+  return AFIRMA_ARQUIVO_PRONTO.some((re) => {
+    const m = texto.match(re);
+    if (!m) return false;
+    /* ⚠️ A janela da negacao e a FRASE da afirmacao, nao um numero de
+       caracteres: "Nao consegui ler a pasta. Gerei o relatorio." tem uma
+       negacao perto que nao e sobre o arquivo. */
+    const antes = texto.slice(0, m.index);
+    return !NEGACAO.test(antes.slice(antes.search(/[^.!?\n]*$/)) + m[0]);
+  });
+}
+
 /**
- * Devolve o aviso a colar na resposta quando o modelo diz ter gerado arquivo e
- * nao gerou. `null` quando a resposta e honesta.
+ * Devolve o aviso a colar na resposta quando o usuario deveria ter um arquivo e
+ * nao tem. `null` quando nao ha o que avisar.
+ *
+ * Dois sinais, nesta ordem de confianca:
+ *
+ * 1. ESTRUTURAL (`forcar`): o pedido era para gerar arquivo, e nenhuma
+ *    ferramenta de escrita foi chamada nem depois do `tool_choice` obrigatorio.
+ *    Isto e estado do servidor, nao leitura de texto, e nao depende de o modelo
+ *    escrever a frase de um jeito previsto.
+ * 2. TEXTUAL (`AFIRMA_ARQUIVO_PRONTO`): a resposta afirma ter produzido o
+ *    arquivo. Rede secundaria, para quando o reconhecimento de intencao nao
+ *    pegou o pedido mas o modelo alucinou sucesso de qualquer forma.
  *
  * ⚠️ A checagem de negacao nao e enfeite: sem ela, "nao gerei o arquivo porque
  * isto e ficha cadastral" (que e a resposta CERTA para uma ficha) seria
  * desmentida pelo proprio sistema, e o aviso viraria ruido que se aprende a
- * ignorar. A janela e a FRASE da afirmacao, nao um numero de caracteres: "Nao
- * consegui ler a pasta. Gerei o relatorio." tem uma negacao perto que nao e
- * sobre o arquivo.
+ * ignorar. Por isso tambem existem DUAS mensagens: contradizer o modelo e
+ * dizer que a expectativa nao foi atendida sao coisas diferentes.
  */
-function avisoDeArquivoNaoGerado(result) {
+function avisoDeArquivoNaoGerado(result, { forcar = false } = {}) {
+  if ((result?.toolCalls || []).some((tc) => arquivos.escreveNoDisco(tc.nome))) return null;
+
   const texto = String(result?.text || "");
-  if (!texto.trim()) return null;
-  if ((result.toolCalls || []).some((tc) => arquivos.escreveNoDisco(tc.nome))) return null;
+  const afirmou = texto.trim() ? afirmaTerGerado(texto) : false;
+  if (!afirmou && !forcar) return null;
 
-  const afirmou = AFIRMA_ARQUIVO_PRONTO.some((re) => {
-    const m = texto.match(re);
-    if (!m) return false;
-    const antes = texto.slice(0, m.index);
-    const fraseDaAfirmacao = antes.slice(antes.search(/[^.!?\n]*$/)) + m[0];
-    return !NEGACAO.test(fraseDaAfirmacao);
-  });
-  if (!afirmou) return null;
+  const comoPedirDeNovo =
+    "\n\nPeça de novo dizendo o que a nova versão precisa ter (\"gere a listagem " +
+    "no padrão A2O com a coluna de tomador\"). Se o arquivo for ficha cadastral, " +
+    "o montador não serve e o caminho é o `_ficha.py`.";
 
-  console.log("[Jarvis] resposta afirma arquivo gerado sem chamada de ferramenta: avisando");
+  if (afirmou) {
+    console.log("[Jarvis] resposta afirma arquivo gerado sem chamada de ferramenta: avisando");
+    return (
+      "\n\n⚠️ **Aviso do sistema: nenhum arquivo foi gerado.** A resposta acima diz " +
+      "ter produzido um arquivo, mas nenhuma ferramenta de escrita foi chamada e " +
+      "nada foi gravado na sandbox. Não existe download pendente." + comoPedirDeNovo
+    );
+  }
+
+  console.log("[Jarvis] pedido de geracao terminou sem chamada de escrita: avisando");
   return (
-    "\n\n⚠️ **Aviso do sistema: nenhum arquivo foi gerado.** A resposta acima diz " +
-    "ter produzido um arquivo, mas nenhuma ferramenta de escrita foi chamada e " +
-    "nada foi gravado na sandbox. Não existe download pendente.\n\n" +
-    "Peça de novo dizendo o que a nova versão precisa ter (\"gere a listagem no " +
-    "padrão A2O com a coluna de tomador\"). Se o arquivo for ficha cadastral, o " +
-    "montador não serve e o caminho é o `_ficha.py`."
+    "\n\n⚠️ **Aviso do sistema: nenhum arquivo foi gerado.** O pedido era para " +
+    "produzir um arquivo e nenhuma ferramenta de escrita foi chamada, então não " +
+    "há nada para baixar." + comoPedirDeNovo
   );
 }
 
@@ -451,7 +492,7 @@ async function resolverConversa(chamar, messages, { forcar = false, rotulo = "",
     result = await chamar(messages, { toolChoice: "required" });
   }
 
-  const aviso = avisoDeArquivoNaoGerado(result);
+  const aviso = avisoDeArquivoNaoGerado(result, { forcar });
   if (aviso) {
     if (aoAvisar) aoAvisar(aviso);
     result = { ...result, text: (result.text || "") + aviso };
