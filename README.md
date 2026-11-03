@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🤖 Jarvis — Assistente Virtual Inteligente
+# 🤖 Cipher — Assistente Virtual Inteligente
 
 Interface de chat com LLM: pergunte qualquer coisa e receba resposta direta, em português.
 
@@ -15,7 +15,7 @@ Interface de chat com LLM: pergunte qualquer coisa e receba resposta direta, em 
 
 ## Visão geral
 
-O **Jarvis** é uma interface de conversa com LLM, servida por um backend Express enxuto. O front é HTML/CSS/JS puro, sem framework nem build: uma SPA de tela única com identidade visual própria — esfera holográfica animada em canvas, partículas de fundo e painel de status do provedor.
+O **Cipher** é uma interface de conversa com LLM, servida por um backend Express enxuto. O front é HTML/CSS/JS puro, sem framework nem build: uma SPA de tela única com identidade visual própria — esfera holográfica animada em canvas, partículas de fundo e painel de status do provedor.
 
 Sem banco de dados, sem cadastro, sem estado no servidor. O histórico da conversa vive no `localStorage` do navegador (validade de 24h) e vai junto em cada requisição, o que dá continuidade ao diálogo sem persistir nada fora da máquina do usuário.
 
@@ -59,8 +59,8 @@ Sem banco de dados, sem cadastro, sem estado no servidor. O histórico da conver
 ## Como rodar localmente
 
 ```bash
-git clone https://github.com/MathTrajan/Jarvis-Chat-Assistente-Virtual-Inteligente.git
-cd Jarvis-Chat-Assistente-Virtual-Inteligente/jarvis-chat-export/backend
+git clone https://github.com/MathTrajan/Cipher-Chat-Assistente-Virtual-Inteligente.git
+cd Cipher-Chat-Assistente-Virtual-Inteligente/app/backend
 
 cp .env.example .env
 # preencha GROQ_API_KEY_1 no .env
@@ -81,7 +81,7 @@ Acesse: **http://localhost:3000**
 | `PORT` | Não | Porta do servidor (padrão: `3000`) |
 | `ALLOWED_ORIGIN` | Não | Origem liberada no CORS (padrão: `*`) |
 
-> Lista completa em `jarvis-chat-export/backend/.env.example`.
+> Lista completa em `app/backend/.env.example`.
 
 ## Endpoints
 

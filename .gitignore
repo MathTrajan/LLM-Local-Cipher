@@ -7,7 +7,7 @@ node_modules/
 # Editor / IDE
 .idea/
 
-# Lixo do Finder. O .gitignore de jarvis-chat-export/ ja cobria la dentro; na
+# Lixo do Finder. O .gitignore de app/ ja cobria la dentro; na
 # raiz faltava, e o arquivo apareceu como nao rastreado na varredura de 03/11.
 .DS_Store
 
@@ -26,7 +26,7 @@ AGENTS.md
 *.local.md
 
 # Saídas geradas
-jarvis-chat-export/graphify-out/
+app/graphify-out/
 
 # Arquivos temporários
 preview.html
@@ -35,4 +35,4 @@ preview.html
 .vercel
 
 # Indice do modo documentos (RAG) — derivado do vault, nunca versionar
-jarvis-chat-export/backend/data/
+app/backend/data/
