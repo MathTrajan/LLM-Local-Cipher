@@ -187,9 +187,22 @@ function lerManualRelatorio() {
   }
 }
 
-function ehSobreRelatorio(mensagem) {
+function ehSobreRelatorio(mensagem, options = {}) {
   const texto = String(mensagem || "");
-  return GATILHOS_RELATORIO.some((re) => re.test(texto));
+  if (GATILHOS_RELATORIO.some((re) => re.test(texto))) return true;
+
+  /* ⚠️ Segunda via, com o inventario da sandbox na mao. O ticket real nao diz
+     "jrxml" nem "a2o": diz "Por favor inserir no relatorio G os tomadores". Em
+     2026-11-03 isso so passou pelos gatilhos porque o front anexa o nome do
+     arquivo na mensagem, e a palavra ".jrxml" veio de carona. Quem digita o
+     pedido com o arquivo JA na sandbox ficava sem o manual.
+     Com um .jrxml disponivel, "relatorio" ou "coluna" ja e sinal bastante: a
+     ambiguidade que o gatilho dupla protege nao existe nesse contexto. */
+  const temJrxml = /\.jrxml/i.test(String(options.listagemArquivos || ""));
+  return (
+    temJrxml &&
+    /\b(relat[oó]rio|listagem|impress[aã]o|layout|coluna|campo|tabela|grupo)\b/i.test(texto)
+  );
 }
 
 /** Devolve options com o manual anexado, quando a mensagem pedir. */
@@ -199,7 +212,7 @@ function comManualDeRelatorio(mensagem, options = {}) {
      prefill sozinho levaria minutos. Pior: o 0.5B nao sustenta o tool calling
      que o manual ensina, entao o custo nao compraria nada. */
   if (localProvider.ehFallback?.()) return options;          // modo documentos ja usa o contexto todo
-  if (!ehSobreRelatorio(mensagem)) return options;
+  if (!ehSobreRelatorio(mensagem, options)) return options;
   const manual = lerManualRelatorio();
   if (!manual) return options;
   return { ...options, manualRelatorio: manual };
@@ -283,10 +296,20 @@ function mensagemDeLeitura(resultados) {
    ferramenta que ou funciona, ou e recusada pelas guardas com motivo.
 */
 const PEDE_GERACAO = [
-  /\b(ger(e|ar|a)|cri(e|ar|a)|monte?|faz(er|a)|produz(a|ir))\b[\s\S]{0,60}\b(relat[oó]rio|arquivo|jrxml|listagem|vers[aã]o)\b/i,
+  /\b(ger(e|ar|a)|cri(e|ar|a)|mont(e|ar|a)|faz(er|a)|produz(a|ir))\b[\s\S]{0,60}\b(relat[oó]rio|arquivo|jrxml|listagem|vers[aã]o)\b/i,
+  /* ⚠️ Verbo de EDICAO, e nao de criacao, e como o ticket real chega. Medido em
+     2026-11-03 com um pedido do cliente: "Por favor inserir no relatorio G os
+     tomadores" nao casava com nenhum padrao desta lista, a ferramenta nao foi
+     forcada e o modelo respondeu em texto dizendo ter gerado um arquivo que
+     nunca existiu. A guarda existia desde a manha e passou ao lado do caso que
+     ela foi feita para pegar, porque so previa "gere" e "crie".
+     Quem usa o sistema nao pede "gere um relatorio": pede para inserir uma
+     coluna no que ja existe. No fluxo de migracao as duas coisas terminam no
+     mesmo lugar, que e um arquivo novo no padrao A2O herdando o contrato. */
+  /\b(inser(e|ir|a)|inclu(a|ir|i)|adicion(e|ar|a)|acrescent(e|ar|a)|coloc(a|ar|que)|p(oe|õe|or)|ajust(e|ar|a)|alter(e|ar|a)|corrij(a|ir)|corrig(e|ir)|troc(a|ar|he)|atualiz(e|ar|a)|refa(z|zer|ca|ça)|migr(e|ar|a))\b[\s\S]{0,80}\b(relat[oó]rio|arquivo|jrxml|listagem|coluna|campo|tabela|grupo)\b/i,
   /\b(no |nos |em )?padr(ao|ão)\s+a2o\b/i,
   /\bprofissionaliz/i,
-  /\bpronto para (baixar|download|testar)\b/i,
+  /\bpront[oa] para (baixar|download|testar)\b/i,
 ];
 
 /**
@@ -298,12 +321,143 @@ async function devoForcarGeracao(mensagem, options) {
   if (options.docs) return false;
   if (!ferramentasPara(options).length) return false;
   if (!PEDE_GERACAO.some((re) => re.test(String(mensagem || "")))) return false;
+  // Reusa o inventario que o prompt ja carregou; so varre o disco sem ele.
+  if (options.listagemArquivos) {
+    return /\.jrxml/i.test(String(options.listagemArquivos));
+  }
   try {
-    const arv = await arquivos.arvoreResumida();
-    return /\.jrxml/i.test(String(arv || ""));
+    return /\.jrxml/i.test(String(await arquivos.arvoreResumida()));
   } catch (_) {
     return false;
   }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   GUARDA CONTRA O ARQUIVO QUE NAO EXISTE
+   ═══════════════════════════════════════════════════════════
+   O forcamento acima reduz a chance de o modelo responder em texto, mas nao
+   fecha o caso: ele ainda pode terminar a conversa AFIRMANDO ter gerado um
+   arquivo. Medido em 2026-11-03, num pedido de cliente: a resposta abria com
+   "Preparei o relatorio A2O... Aqui esta o arquivo gerado com o nome
+   relconhecimento_7_ajustado.jrxml" e fechava com "# Gerado por: ...". Nenhuma
+   ferramenta foi chamada, nenhum arquivo existia na sandbox, e nada no sistema
+   contradizia a afirmacao. O usuario ficou esperando um botao de download que
+   nunca ia aparecer.
+
+   O servidor sabe a verdade: se nenhuma chamada de ferramenta escreve em disco,
+   nao ha arquivo. Isto nao depende do modelo colaborar, e e por isso que a
+   guarda vive aqui e nao no prompt. */
+const AFIRMA_ARQUIVO_PRONTO = [
+  /\b(aqui est[aá]|segue|segue em anexo)\b[\s\S]{0,40}\b(arquivo|relat[oó]rio|vers[aã]o|jrxml)\b/i,
+  /\b(arquivo|relat[oó]rio)\b[\s\S]{0,14}\b(gerado|criado|ajustado|pronto|salvo|anexado)\b/i,
+  /\b(gerei|criei|preparei|montei|salvei|ajustei|produzi)\b/i,
+  /\bpront[oa] para (baixar|download)\b/i,
+  /\b(pode|voc[eê] pode)\s+(baixar|fazer o download)\b/i,
+  /^#\s*Gerado por:/im,
+];
+
+/** Palavras que invertem o sentido da afirmacao. */
+const NEGACAO = /\b(n[aã]o|nenhum|nenhuma|sem|nada|impossivel|impossível)\b/i;
+
+/**
+ * Devolve o aviso a colar na resposta quando o modelo diz ter gerado arquivo e
+ * nao gerou. `null` quando a resposta e honesta.
+ *
+ * ⚠️ A checagem de negacao nao e enfeite: sem ela, "nao gerei o arquivo porque
+ * isto e ficha cadastral" (que e a resposta CERTA para uma ficha) seria
+ * desmentida pelo proprio sistema, e o aviso viraria ruido que se aprende a
+ * ignorar. A janela e a FRASE da afirmacao, nao um numero de caracteres: "Nao
+ * consegui ler a pasta. Gerei o relatorio." tem uma negacao perto que nao e
+ * sobre o arquivo.
+ */
+function avisoDeArquivoNaoGerado(result) {
+  const texto = String(result?.text || "");
+  if (!texto.trim()) return null;
+  if ((result.toolCalls || []).some((tc) => arquivos.escreveNoDisco(tc.nome))) return null;
+
+  const afirmou = AFIRMA_ARQUIVO_PRONTO.some((re) => {
+    const m = texto.match(re);
+    if (!m) return false;
+    const antes = texto.slice(0, m.index);
+    const fraseDaAfirmacao = antes.slice(antes.search(/[^.!?\n]*$/)) + m[0];
+    return !NEGACAO.test(fraseDaAfirmacao);
+  });
+  if (!afirmou) return null;
+
+  console.log("[Jarvis] resposta afirma arquivo gerado sem chamada de ferramenta: avisando");
+  return (
+    "\n\n⚠️ **Aviso do sistema: nenhum arquivo foi gerado.** A resposta acima diz " +
+    "ter produzido um arquivo, mas nenhuma ferramenta de escrita foi chamada e " +
+    "nada foi gravado na sandbox. Não existe download pendente.\n\n" +
+    "Peça de novo dizendo o que a nova versão precisa ter (\"gere a listagem no " +
+    "padrão A2O com a coluna de tomador\"). Se o arquivo for ficha cadastral, o " +
+    "montador não serve e o caminho é o `_ficha.py`."
+  );
+}
+
+/**
+ * Conduz a conversa com o modelo ate ela convergir: laco de leitura, forcamento
+ * da ferramenta e guarda do arquivo inexistente.
+ *
+ * ⚠️ Esta funcao existe para matar um erro que eu cometi TRES vezes: ligar algo
+ * em `processMessage` e esquecer em `processMessageStream`, ou o contrario. As
+ * duas eram quase identicas e divergiam a cada mudanca, e a que o navegador usa
+ * e a do stream, entao a metade esquecida era normalmente a que o usuario via.
+ * Agora a logica e uma so e `chamar` e o unico ponto que difere entre as duas.
+ *
+ * `chamar(mensagens, extras)` faz a inferencia. `aoAvisar(texto)` recebe o aviso
+ * do sistema; no stream ele precisa ir para a tela, porque o texto do modelo ja
+ * foi enviado token a token e nao da para retirar.
+ */
+async function resolverConversa(chamar, messages, { forcar = false, rotulo = "", aoAvisar = null } = {}) {
+  let result = await chamar(messages, {});
+
+  /* Se o modelo so pediu LEITURA, executa e pergunta de novo com o resultado.
+     Sem isto a resposta volta vazia com uma proposta pendente, e o usuario
+     precisa clicar e perguntar outra vez: duas inferencias de ~20 s para uma
+     pergunta so. Ver executarLeituras(). */
+  for (let rodada = 0; rodada < MAX_RODADAS_LEITURA; rodada++) {
+    const pedidas = result.toolCalls || [];
+    const soLeitura = pedidas.length > 0 && pedidas.every((tc) => !arquivos.escreveNoDisco(tc.nome));
+    if (!soLeitura) break;
+
+    const leituras = await executarLeituras(pedidas);
+    if (!leituras.length) break;
+    console.log(`[Jarvis] laco de leitura${rotulo}: ${leituras.map((l) => l.nome).join(", ")}`);
+
+    messages.push({ role: "assistant", content: result.text || "" });
+    messages.push(mensagemDeLeitura(leituras));
+    result = await chamar(messages, {});
+  }
+
+  /* ⚠️ O forcamento vem DEPOIS do laco de leitura, e a ordem foi um bug real.
+     Ele era checado antes, sobre a PRIMEIRA resposta, e por isso so pegava o
+     caso em que o modelo responde em texto de saida. O fluxo de verdade e
+     outro: ele chama `ler_arquivo`, recebe a especificacao e SO ENTAO responde
+     em texto, e nesse ponto ninguem mais checava nada. Foi assim que o pedido
+     do cliente em 2026-11-03 terminou sem arquivo.
+     Depois da leitura tambem e o melhor momento: o modelo ja tem o contrato na
+     mao, em vez de ser obrigado a chamar a ferramenta no escuro. */
+  if (forcar && !(result.toolCalls || []).length) {
+    console.log(`[Jarvis] pedido de geracao respondido em texto${rotulo}: repetindo com ferramenta obrigatoria`);
+    messages.push({ role: "assistant", content: result.text || "" });
+    messages.push({
+      role: "user",
+      content:
+        "Nao responda em texto. Chame a ferramenta gerar_relatorio_a2o agora, " +
+        "com herdarDe apontando para o .jrxml que voce leu e um nome de saida DIFERENTE do original.",
+    });
+    // Uma tentativa so: duas custariam 2 min no 3B.
+    result = await chamar(messages, { toolChoice: "required" });
+  }
+
+  const aviso = avisoDeArquivoNaoGerado(result);
+  if (aviso) {
+    if (aoAvisar) aoAvisar(aviso);
+    result = { ...result, text: (result.text || "") + aviso };
+  }
+
+  return result;
 }
 
 /** Monta a lista de mensagens que vai para o modelo: prompt + histórico + pergunta. */
@@ -345,7 +499,9 @@ async function comInventarioDeArquivos(options) {
 }
 
 async function processMessage(userMessage, conversationHistory = [], options = {}) {
-  const opcoes = await comInventarioDeArquivos(comManualDeRelatorio(userMessage, options));
+  /* ⚠️ O inventario vem PRIMEIRO: a decisao do manual olha a sandbox para
+     reconhecer pedido de ticket que nao cita "jrxml". Ver ehSobreRelatorio(). */
+  const opcoes = comManualDeRelatorio(userMessage, await comInventarioDeArquivos(options));
   const messages = montarMensagens(userMessage, conversationHistory, opcoes);
   const startTime = Date.now();
 
@@ -353,56 +509,17 @@ async function processMessage(userMessage, conversationHistory = [], options = {
 
   try {
     const tools = ferramentasPara(options);
-    let result = await localProvider.chat(messages, {
-      maxTokens: options.maxTokens,
-      temperature: options.temperature,
-      tools,
+    const chamar = (msgs, extras = {}) =>
+      localProvider.chat(msgs, {
+        maxTokens: options.maxTokens,
+        temperature: options.temperature,
+        tools,
+        ...extras,
+      });
+
+    const result = await resolverConversa(chamar, messages, {
+      forcar: await devoForcarGeracao(userMessage, opcoes),
     });
-
-    /* ⚠️ TERCEIRA vez que algo precisou ser ligado nas duas funcoes e eu liguei
-       so numa: antes foi o laco de leitura (so no /api/chat, e o navegador usa
-       stream) e o manual de relatorio. `processMessage` e `processMessageStream`
-       sao quase identicas e divergem a cada mudanca.
-       Quem mexer aqui: confira se o mesmo bloco existe na outra. */
-    const forcar = await devoForcarGeracao(userMessage, options);
-    if (forcar && !(result.toolCalls || []).length) {
-      console.log("[Jarvis] pedido de geracao respondido em texto: repetindo com ferramenta obrigatoria");
-      messages.push({ role: "assistant", content: result.text || "" });
-      messages.push({
-        role: "user",
-        content:
-          "Nao responda em texto. Chame a ferramenta gerar_relatorio_a2o agora, " +
-          "com herdarDe apontando para o .jrxml que voce leu e um nome de saida DIFERENTE do original.",
-      });
-      result = await localProvider.chat(messages, {
-        maxTokens: options.maxTokens,
-        temperature: options.temperature,
-        tools,
-        toolChoice: "required",
-      });
-    }
-
-    /* Se o modelo so pediu LEITURA, executa e pergunta de novo com o resultado.
-       Sem isto a resposta volta vazia com uma proposta pendente, e o usuario
-       precisa clicar e perguntar outra vez: duas inferencias de ~20 s para uma
-       pergunta so. Ver executarLeituras(). */
-    for (let rodada = 0; rodada < MAX_RODADAS_LEITURA; rodada++) {
-      const pedidas = result.toolCalls || [];
-      const soLeitura = pedidas.length > 0 && pedidas.every((tc) => !arquivos.escreveNoDisco(tc.nome));
-      if (!soLeitura) break;
-
-      const leituras = await executarLeituras(pedidas);
-      if (!leituras.length) break;
-      console.log(`[Jarvis] laco de leitura: ${leituras.map((l) => l.nome).join(", ")}`);
-
-      messages.push({ role: "assistant", content: result.text || "" });
-      messages.push(mensagemDeLeitura(leituras));
-      result = await localProvider.chat(messages, {
-        maxTokens: options.maxTokens,
-        temperature: options.temperature,
-        tools,
-      });
-    }
 
     const latency = Date.now() - startTime;
     console.log(`[Jarvis] ✓ Resposta local (${result.model}) em ${latency}ms`);
@@ -426,7 +543,9 @@ async function processMessageStream(userMessage, conversationHistory = [], optio
   const onDelta = handlers.onDelta || (() => {});
   const onStart = handlers.onStart || (() => {});
 
-  const opcoes = await comInventarioDeArquivos(comManualDeRelatorio(userMessage, options));
+  /* ⚠️ O inventario vem PRIMEIRO: a decisao do manual olha a sandbox para
+     reconhecer pedido de ticket que nao cita "jrxml". Ver ehSobreRelatorio(). */
+  const opcoes = comManualDeRelatorio(userMessage, await comInventarioDeArquivos(options));
   const messages = montarMensagens(userMessage, conversationHistory, opcoes);
   const startTime = Date.now();
 
@@ -447,48 +566,18 @@ async function processMessageStream(userMessage, conversationHistory = [], optio
       onDelta(delta);
     };
 
-    let result = await localProvider.chatStream(messages, opcoesStream, aoReceber);
+    const chamar = (msgs, extras = {}) =>
+      localProvider.chatStream(msgs, { ...opcoesStream, ...extras }, aoReceber);
 
-    /* ⚠️ Se o pedido era claramente "gere o arquivo" e o modelo respondeu em
-       TEXTO, repete a chamada com a ferramenta obrigatoria. Sem isto ele cola a
-       especificacao como se fosse o resultado e nenhum arquivo e criado, que foi
-       a falha de 2026-11-03. Uma tentativa so: duas custariam 2 min no 3B. */
-    const forcar = await devoForcarGeracao(userMessage, options);
-    if (forcar && !(result.toolCalls || []).length) {
-      console.log("[Jarvis] pedido de geracao respondido em texto: repetindo com ferramenta obrigatoria");
-      messages.push({ role: "assistant", content: result.text || "" });
-      messages.push({
-        role: "user",
-        content:
-          "Nao responda em texto. Chame a ferramenta gerar_relatorio_a2o agora, " +
-          "com herdarDe apontando para o .jrxml que voce leu e um nome de saida DIFERENTE do original.",
-      });
-      result = await localProvider.chatStream(
-        messages,
-        { ...opcoesStream, toolChoice: "required" },
-        aoReceber
-      );
-    }
-
-    /* ⚠️ O laco de leitura PRECISA existir aqui tambem, e nao so no
-       processMessage. O front usa /api/chat/stream, entao a versao sem laco era
-       justamente a que o usuario via: pedir "leia o X e faca Y" deixava a tela
-       em "Pensando" e terminava sem resposta, com uma proposta de `ler_arquivo`
-       pendente. Pelo curl (/api/chat) funcionava, o que fazia o bug parecer do
-       front. Medido em 2026-11-01. */
-    for (let rodada = 0; rodada < MAX_RODADAS_LEITURA; rodada++) {
-      const pedidas = result.toolCalls || [];
-      const soLeitura = pedidas.length > 0 && pedidas.every((tc) => !arquivos.escreveNoDisco(tc.nome));
-      if (!soLeitura) break;
-
-      const leituras = await executarLeituras(pedidas);
-      if (!leituras.length) break;
-      console.log(`[Jarvis] laco de leitura (stream): ${leituras.map((l) => l.nome).join(", ")}`);
-
-      messages.push({ role: "assistant", content: result.text || "" });
-      messages.push(mensagemDeLeitura(leituras));
-      result = await localProvider.chatStream(messages, opcoesStream, aoReceber);
-    }
+    const result = await resolverConversa(chamar, messages, {
+      forcar: await devoForcarGeracao(userMessage, opcoes),
+      rotulo: " (stream)",
+      /* ⚠️ O aviso PRECISA ir pelo onDelta. O texto do modelo ja foi enviado
+         token a token e esta na tela: nao da para corrigir `result.text` e
+         esperar que o navegador releia. Sem isto o aviso so apareceria na
+         conversa recarregada, que e tarde. */
+      aoAvisar: aoReceber,
+    });
 
     const latency = Date.now() - startTime;
     console.log(`[Jarvis] ✓ Stream local (${result.model}) em ${latency}ms`);
@@ -601,4 +690,11 @@ module.exports = {
   checkProvidersHealth,
   getJarvisSystemPrompt,
   AgentError,
+  /* Exportados para `scripts/testar-relatorio.js`. As tres decisoes que fizeram
+     um pedido de cliente terminar sem arquivo moram nelas, e nenhuma dava para
+     testar sem subir o modelo. */
+  ehSobreRelatorio,
+  devoForcarGeracao,
+  avisoDeArquivoNaoGerado,
+  resolverConversa,
 };

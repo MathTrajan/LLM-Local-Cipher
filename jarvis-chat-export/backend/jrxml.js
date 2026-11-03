@@ -275,12 +275,66 @@ function desescapar(txt) {
     .replace(/&amp;/g, "&");
 }
 
+/** Conta `<text>` dentro de todas as bandas de um tipo (`detail`, `columnHeader`...). */
+function rotulosDaBanda(xml, banda) {
+  const re = new RegExp(`<${banda}\\b[\\s\\S]*?</${banda}>`, "g");
+  return [...xml.matchAll(re)]
+    .reduce((n, m) => n + (m[0].match(/<text>/g) || []).length, 0);
+}
+
+/**
+ * Decide se o arquivo e FICHA CADASTRAL ou LISTAGEM, que e a pergunta que muda
+ * tudo: ficha quer campo empilhado e listagem quer tabela, e os dois nao se
+ * convertem um no outro.
+ *
+ * ⚠️ A contagem de `<field>` NAO serve para isso, e usa-la foi um erro medido
+ * em 2026-11-03: `pessoa_imprimir_3` (ficha) tem 73 campos e `relconhecimento_7`
+ * (listagem de CT-e) tem 75. O limiar de 20 campos classificava os dois como
+ * ficha, e o sistema mandou o modelo recusar um pedido que o montador atendia.
+ * Campo declarado no dataset nao e coluna exibida: um relatorio pode declarar 75
+ * e mostrar 6.
+ *
+ * O que separa de verdade, medido nos dois arquivos:
+ *
+ * |                | listagem | ficha |
+ * |----------------|----------|-------|
+ * | columnHeader   | 6 rotulos| ausente |
+ * | detail         | vazio    | 89 rotulos empilhados, altura 56 |
+ * | Sum/Count      | 13       | 0 |
+ * | grupos         | 2        | 0 |
+ *
+ * Tabela tem linha de cabecalho e repete so o dado; ficha repete o ROTULO em
+ * cada registro, porque cada campo leva o seu nome ao lado.
+ */
+function classificarLayout(xml) {
+  const sinais = {
+    rotulosColHeader: rotulosDaBanda(xml, "columnHeader"),
+    rotulosDetail: rotulosDaBanda(xml, "detail"),
+    totalizadores: (xml.match(/calculation="(Sum|Count|Average)"/g) || []).length,
+    grupos: (xml.match(/<group name="/g) || []).length,
+    campos: (xml.match(/<field name="/g) || []).length,
+  };
+
+  /* Ficha exige os DOIS sinais: sem cabecalho de tabela E com rotulo empilhado
+     no detail. Só a ausencia de columnHeader nao basta — relatorio que desenha
+     tudo em groupFooter tambem nao tem, e e listagem. */
+  if (sinais.rotulosColHeader < 2 && sinais.rotulosDetail >= 8) {
+    return { tipo: "ficha", sinais };
+  }
+  if (sinais.rotulosColHeader >= 2 || sinais.totalizadores > 0 || sinais.grupos > 0) {
+    return { tipo: "listagem", sinais };
+  }
+  return { tipo: "indefinido", sinais };
+}
+
 /**
  * Le um .jrxml e devolve a especificacao em markdown compacto.
  * `limiteTextos` corta a lista de rotulos: num relatorio com 53 staticText, os
  * primeiros ja mostram o padrao de nomenclatura e o resto e repeticao.
+ * `caminho` entra na secao "O que fazer" como valor pronto de `herdarDe`, que e
+ * justamente o argumento que o modelo mais esquece.
  */
-function resumir(conteudo, { limiteTextos = 40, limiteExpr = 30, tetoTokens = 2600 } = {}) {
+function resumir(conteudo, { limiteTextos = 40, limiteExpr = 30, tetoTokens = 2600, caminho = null } = {}) {
   const xml = String(conteudo || "");
 
   /* ⚠️ Teto DURO de tamanho. Medido em 2026-11-03 com o pessoa_imprimir_3.jrxml
@@ -361,20 +415,6 @@ function resumir(conteudo, { limiteTextos = 40, limiteExpr = 30, tetoTokens = 26
   // ─── Sinais de problema, para o modelo saber o que corrigir ───
   const alertas = [];
 
-  /* ⚠️ Ficha ou listagem? Decide pela contagem de campos e avisa em primeiro
-     lugar. Em 2026-11-03 o modelo leu uma ficha de 73 campos e propos uma
-     TABELA DE 18 COLUNAS: cada coluna ficaria com ~30 pontos, menos do que cabe
-     a palavra "Razao Social". Ficha quer campo empilhado, listagem quer tabela,
-     e os dois nao se convertem um no outro. */
-  const qtdCampos = fields.length;
-  if (qtdCampos > 20) {
-    alertas.unshift(
-      `ISTO E FICHA CADASTRAL, nao listagem: tem ${qtdCampos} campos. ` +
-        `O gerar_relatorio_a2o faz TABELA e nao serve aqui. Diga isso ao usuario ` +
-        `e aponte o _ficha.py, que monta campo empilhado em secoes. ` +
-        `Se ele quiser mesmo uma listagem, escolha no maximo 8 colunas que importem.`
-    );
-  }
   if (/<subreport\b/.test(xml)) {
     alertas.push("USA SUBRELATORIO: na base A2O isso falha com Resource not found. Troque por tabela() com jr:list.");
   }
@@ -401,7 +441,70 @@ function resumir(conteudo, { limiteTextos = 40, limiteExpr = 30, tetoTokens = 26
     saida = saida.slice(0, Math.floor(tetoTokens * 3.2))
       + "\n\n[resumo cortado no teto de contexto]";
   }
-  return saida;
+
+  /* ⚠️ A instrucao e colada DEPOIS do corte, de proposito. Ela e a parte que
+     muda o comportamento, e os dois truncamentos acima cortam pelo fim: num
+     arquivo grande ela seria justamente o que se perde, deixando o modelo com
+     os dados e sem o que fazer com eles. */
+  return saida + instrucaoDeUso(xml, caminho);
+}
+
+/**
+ * O passo seguinte, escrito para o modelo e nao para o usuario.
+ *
+ * ⚠️ Isto existe porque entregar a especificacao sozinha nao bastou. Medido em
+ * 2026-11-03 com o `relconhecimento_7`: o modelo recebeu o resumo, nao chamou
+ * ferramenta nenhuma e devolveu a especificacao REESCRITA de memoria como se
+ * fosse o arquivo pronto, com numeros trocados (disse 8 campos onde ha 75) e um
+ * nome de arquivo que nunca existiu. Dados sem instrucao, um modelo pequeno
+ * preenche com o que parece plausivel.
+ */
+function instrucaoDeUso(xml, caminho) {
+  const { tipo, sinais } = classificarLayout(xml);
+  const origem = caminho ? `"${caminho}"` : "o caminho do arquivo que voce leu";
+
+  if (tipo === "ficha") {
+    return (
+      `\n\n## O que fazer\n` +
+      `ISTO E FICHA CADASTRAL: nao tem columnHeader e empilha ${sinais.rotulosDetail} ` +
+      `rotulos no detail, um ao lado de cada campo.\n` +
+      `A ferramenta gerar_relatorio_a2o faz TABELA e NAO serve aqui. ` +
+      `Diga isso ao usuario em uma frase e aponte o _ficha.py, que monta campo ` +
+      `empilhado em secoes.\n` +
+      `NAO gere arquivo e NAO diga que gerou: nenhum arquivo existe nesta resposta.`
+    );
+  }
+
+  if (tipo === "listagem") {
+    const porque = [
+      sinais.rotulosColHeader >= 2 ? `columnHeader com ${sinais.rotulosColHeader} rotulos` : null,
+      sinais.totalizadores ? `${sinais.totalizadores} totalizadores Sum/Count` : null,
+      sinais.grupos ? `${sinais.grupos} grupo(s)` : null,
+    ].filter(Boolean).join(", ");
+    return (
+      `\n\n## O que fazer\n` +
+      `ISTO E LISTAGEM (${porque}), e o gerar_relatorio_a2o atende.\n` +
+      `Chame a ferramenta AGORA, nesta mesma resposta. Nao responda em texto e ` +
+      `nao reescreva a especificacao acima: ela e o material, nao o resultado.\n` +
+      `Argumentos:\n` +
+      /* Sem travessao: o modelo copia o texto da instrucao para a resposta, e a
+         resposta e frase visivel ao usuario. */
+      `- herdarDe: ${origem}. O contrato sai dele, nao liste campos a mao.\n` +
+      `- colunas: so as que o pedido exige, teto de 14 (acima de 8 vira paisagem).\n` +
+      `- caminho: nome de saida DIFERENTE do original.\n` +
+      `Os ${sinais.campos} campos listados acima sao o dataset inteiro, NAO ` +
+      `${sinais.campos} colunas.`
+    );
+  }
+
+  return (
+    `\n\n## O que fazer\n` +
+    `Nao da para dizer pelos sinais se e ficha ou listagem ` +
+    `(columnHeader: ${sinais.rotulosColHeader} rotulos, detail: ${sinais.rotulosDetail}). ` +
+    `Pergunte ao usuario antes de gerar. Nao diga que gerou arquivo sem ter chamado ` +
+    `a ferramenta.`
+  );
 }
 
 module.exports.resumir = resumir;
+module.exports.classificarLayout = classificarLayout;

@@ -263,13 +263,16 @@ async function lerArquivo({ caminho } = {}) {
   if (ehJrxmlGrande) {
     return {
       caminho: relativo(alvo),
-      conteudo: jrxml.resumir(conteudo),
+      /* O caminho vai junto porque o resumo monta a instrucao de `herdarDe` com
+         ele. Sem isso a instrucao sai generica ("o arquivo que voce leu") e o
+         modelo volta a esquecer o argumento. */
+      conteudo: jrxml.resumir(conteudo, { caminho: relativo(alvo) }),
       resumido: true,
       truncado: false,
       aviso:
         `Arquivo de ${Math.round(conteudo.length / 1024)} KB, grande demais para o contexto. ` +
-        `Acima esta a ESPECIFICACAO extraida (contrato, secoes e o que corrigir), nao o XML. ` +
-        `Use isso para escrever o gerador Python com o _ficha.py.`,
+        `Acima esta a ESPECIFICACAO extraida (contrato, secoes e o que fazer), nao o XML. ` +
+        `Siga a secao "O que fazer" do resumo.`,
     };
   }
 

@@ -10,7 +10,7 @@
     "indexar": "node scripts/indexar-documentos.js",
     "checar": "node scripts/checar-travessao.js",
     "senha": "node scripts/gerar-senha.js",
-    "testar": "node scripts/testar-arquivos.js && node scripts/testar-indice.js && node scripts/checar-travessao.js --autoteste"
+    "testar": "node scripts/testar-arquivos.js && node scripts/testar-indice.js && node scripts/testar-relatorio.js && node scripts/checar-travessao.js --autoteste"
   },
   "dependencies": {
     "cors": "^2.8.5",
