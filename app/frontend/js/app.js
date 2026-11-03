@@ -1,5 +1,5 @@
 /* ════════════════════════════════════════════════
-   J.A.R.V.I.S — Orbital Core v6.0 · app.js
+   Cipher — Orbital Core v6.0 · app.js
    ════════════════════════════════════════════════ */
 
 const API_BASE    = window.location.origin;

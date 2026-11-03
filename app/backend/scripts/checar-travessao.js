@@ -11,7 +11,7 @@
  * NAO serve aqui e da 25 falsos positivos neste front:
  *
  *   - comentario de BLOCO multi-linha, cuja linha do meio nao comeca com `*`
- *     (`   J.A.R.V.I.S — Neural Core v5.0`);
+ *     (`   Cipher — Neural Core v5.0`);
  *   - placeholder de valor vazio, que e uso legitimo (`<span id="rs-peso">—</span>`
  *     e `setText(el, info.bytes ? formatarBytes(info.bytes) : "—")`).
  *
@@ -98,7 +98,7 @@ if (process.argv.includes("--autoteste")) {
     ["placeholder entre tags", ".html", '<span id="rs-peso">—</span>', 0],
     ["placeholder em string", ".js", 'setText(el, info.bytes ? fmt(info.bytes) : "—");', 0],
     ["comentario de linha", ".js", "// isto — pode ter travessao", 0],
-    ["comentario de bloco, linha do meio sem asterisco", ".js", "/* titulo\n   J.A.R.V.I.S — Neural Core\n*/", 0],
+    ["comentario de bloco, linha do meio sem asterisco", ".js", "/* titulo\n   Cipher — Neural Core\n*/", 0],
     ["url com barras nao vira comentario", ".js", 'const u = "https://x.com/a";\nconst t = "Erro — veja";', 1],
     ["comentario html", ".html", "<!-- nota — interna -->", 0],
   ];
