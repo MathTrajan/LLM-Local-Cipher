@@ -327,6 +327,8 @@ function classificarLayout(xml) {
     totalizadores: (xml.match(/calculation="(Sum|Count|Average)"/g) || []).length,
     grupos: (xml.match(/<group name="/g) || []).length,
     campos: (xml.match(/<field name="/g) || []).length,
+    // O que o relatorio REALMENTE mostra, por banda. Ver exibicoesPorBanda().
+    ...exibicoesPorBanda(xml),
   };
 
   /* Ficha exige os DOIS sinais: sem cabecalho de tabela E com rotulo empilhado
@@ -335,10 +337,73 @@ function classificarLayout(xml) {
   if (sinais.rotulosColHeader < 2 && sinais.rotulosDetail >= 8) {
     return { tipo: "ficha", sinais };
   }
+
+  /* ⚠️ TERCEIRO tipo, e a falta dele me fez errar o diagnostico em 2026-11-03.
+     Eu tinha dois baldes (ficha e listagem) e disse ao usuario que o
+     `relconhecimento_7` era "listagem, o montador atende". Nao e: o `detail`
+     dele esta VAZIO (nenhuma expressao de campo), os numeros saem de 13
+     variaveis `$V{SUM...}` nos `groupFooter`, e o corpo e totais por UF e por
+     CFOP. Isso e relatorio AGREGADO.
+     A diferenca importa porque o montador monta tabela de LINHAS: passar um
+     agregado por ele devolve um relatorio valido, bonito e estruturalmente
+     diferente do que o cliente usa. E o mesmo "valido e inutil" de sempre, so
+     que num nivel que nenhuma das outras guardas alcanca.
+     O sinal e direto: nada de campo no detail, e agregacao exibida fora dele. */
+  if (sinais.camposNoDetail === 0 && sinais.variaveisExibidas > 0) {
+    return { tipo: "agregado", sinais };
+  }
+
   if (sinais.rotulosColHeader >= 2 || sinais.totalizadores > 0 || sinais.grupos > 0) {
     return { tipo: "listagem", sinais };
   }
   return { tipo: "indefinido", sinais };
+}
+
+/**
+ * O que o relatorio EXIBE, separado do que ele declara.
+ *
+ * ⚠️ Declarar nao e exibir, e confundir os dois foi a raiz de dois diagnosticos
+ * errados: um relatorio pode declarar 75 `<field>` e mostrar 2. O que diz o
+ * formato e a expressao dentro da banda, nao a lista do contrato.
+ */
+function exibicoesPorBanda(xml) {
+  /* ⚠️ So conta variavel que o relatorio DECLARA com `calculation`. Contar todo
+     `$V{}` exibido classificava errado, e isso foi medido antes de subir: o
+     `nfs-listagem.jrxml` caiu em "agregado" por causa de DUAS variaveis que
+     nenhum relatorio escapa de ter, `PAGE_NUMBER` e companhia, que o
+     JasperReports injeta sozinho no rodape e ninguem declara.
+     Agregacao de verdade e `<variable calculation="Sum">` escrita no arquivo. */
+  const agregadasDeclaradas = new Set(
+    [...xml.matchAll(/<variable name="([^"]+)"[^>]*calculation="(Sum|Count|Average|Highest|Lowest)"/g)]
+      .map((m) => m[1])
+  );
+
+  const bandas = [...xml.matchAll(
+    /<(title|pageHeader|columnHeader|detail|columnFooter|pageFooter|summary|groupHeader|groupFooter)\b[\s\S]*?<\/\1>/g
+  )];
+  const camposExibidos = new Set();
+  const variaveis = new Set();
+  let camposNoDetail = 0;
+
+  for (const b of bandas) {
+    const exprs = [...b[0].matchAll(/<textFieldExpression>([\s\S]*?)<\/textFieldExpression>/g)]
+      .map((m) => limparExpr(m[1]));
+    for (const e of exprs) {
+      for (const m of e.matchAll(/\$F\{([^}]+)\}/g)) {
+        camposExibidos.add(m[1]);
+        if (b[1] === "detail") camposNoDetail++;
+      }
+      for (const m of e.matchAll(/\$V\{([^}]+)\}/g)) {
+        if (agregadasDeclaradas.has(m[1])) variaveis.add(m[1]);
+      }
+    }
+  }
+  return {
+    camposExibidos: [...camposExibidos],
+    camposNoDetail,
+    variaveisExibidas: variaveis.size,
+    variaveis: [...variaveis],
+  };
 }
 
 /**
@@ -498,6 +563,25 @@ function instrucaoDeUso(xml, caminho) {
     );
   }
 
+  if (tipo === "agregado") {
+    return (
+      `\n\n## O que fazer\n` +
+      `ISTO E RELATORIO AGREGADO, nao listagem: o detail nao mostra campo ` +
+      `nenhum e os numeros saem de ${sinais.variaveisExibidas} variaveis ` +
+      `(${sinais.variaveis.slice(0, 6).join(", ")}${sinais.variaveis.length > 6 ? ", ..." : ""}) ` +
+      `nos grupos e no summary. O corpo sao TOTAIS por grupo, nao linhas.\n` +
+      `O gerar_relatorio_a2o monta tabela de LINHAS. Ele NAO reproduz este ` +
+      `relatorio: o que sair vai ser valido e estruturalmente diferente do que ` +
+      `o cliente usa hoje.\n` +
+      `Nao gere sem confirmar. Diga ao usuario, em uma frase, que o original e ` +
+      `um relatorio de totais agrupados e pergunte qual dos dois ele quer:\n` +
+      `  (a) a listagem detalhada dos registros, que o montador faz; ou\n` +
+      `  (b) o mesmo agregado, que hoje sai pelo _ficha.py.\n` +
+      `Os unicos campos exibidos no original sao: ` +
+      `${sinais.camposExibidos.join(", ") || "nenhum"}.`
+    );
+  }
+
   if (tipo === "listagem") {
     const porque = [
       sinais.rotulosColHeader >= 2 ? `columnHeader com ${sinais.rotulosColHeader} rotulos` : null,
@@ -524,17 +608,37 @@ function instrucaoDeUso(xml, caminho) {
       `um nome COPIADO da lista "## Campos" acima, letra por letra. Nome ` +
       `abreviado ou inventado e recusado: $F{G} nao existe, razaoSocialTomador ` +
       `existe. O rotulo pode ser livre; o campo nao.\n` +
+      /* ⚠️ Medido em 2026-11-03: pedido generico ("coloque no padrao a2o"), sem
+         dizer colunas, e o modelo inventou `numero`, `descricao` e `valorTotal`.
+         Nenhum existe. Quando ninguem diz quais colunas, as certas sao as que o
+         ORIGINAL ja exibe, e isso esta no arquivo: basta nao deixar ele
+         adivinhar. */
+      (sinais.camposExibidos.length
+        ? `  Se o pedido NAO disser quais colunas, use as que o original ja ` +
+          `exibe: ${sinais.camposExibidos.join(", ")}. Nao invente nome ` +
+          `generico como "numero" ou "valorTotal".\n`
+        : "") +
       `Os ${sinais.campos} campos listados acima sao o dataset inteiro, NAO ` +
       `${sinais.campos} colunas.`
     );
   }
 
+  /* ⚠️ Este ramo nao e exceção rara: medido nos 6 .jrxml da sandbox em
+     2026-11-03, TRES caem aqui. Sao arquivos que nao exibem nada nas bandas
+     padrao (modelo/esqueleto, ou corpo montado em componente que este extrator
+     nao le). Afirmar o tipo nesse caso seria inventar; pedir confirmacao e a
+     resposta certa, e por isso a mensagem precisa ser util e nao so evasiva. */
   return (
     `\n\n## O que fazer\n` +
-    `Nao da para dizer pelos sinais se e ficha ou listagem ` +
-    `(columnHeader: ${sinais.rotulosColHeader} rotulos, detail: ${sinais.rotulosDetail}). ` +
-    `Pergunte ao usuario antes de gerar. Nao diga que gerou arquivo sem ter chamado ` +
-    `a ferramenta.`
+    `NAO DA PARA DIZER o tipo por este arquivo: as bandas padrao nao exibem ` +
+    `campo nem agregacao (columnHeader: ${sinais.rotulosColHeader} rotulos, ` +
+    `detail: ${sinais.camposNoDetail} campos, ${sinais.camposExibidos.length} ` +
+    `campo(s) exibido(s) em ${sinais.campos} declarados). Pode ser modelo sem ` +
+    `corpo, ou corpo montado em componente (jr:table, jr:list) que o extrator ` +
+    `nao le.\n` +
+    `Nao gere no escuro. Diga ao usuario o que voce viu, em uma frase, e ` +
+    `pergunte quais colunas ele quer.\n` +
+    `Nao diga que gerou arquivo sem ter chamado a ferramenta.`
   );
 }
 

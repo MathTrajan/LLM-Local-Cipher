@@ -58,16 +58,40 @@ function campos(n) {
   return Array.from({ length: n }, (_, i) => `<field name="campo${i}" class="java.lang.String"/>`).join("");
 }
 
-/* Espelha o relconhecimento_7.jrxml: columnHeader com 6 rotulos, detail vazio
-   (o dado sai nos groupFooter), 13 totalizadores, 2 grupos, 75 campos. */
+/** Expressoes de CAMPO numa banda: e o que diz que a banda mostra linha. */
+function exprCampos(nomes) {
+  return nomes
+    .map((n) => `<textField><textFieldExpression><![CDATA[$F{${n}}]]></textFieldExpression></textField>`)
+    .join("");
+}
+
+/* Listagem de verdade: cabecalho de tabela E detail mostrando campo por linha.
+   ⚠️ Esta fixture ja foi modelada no relconhecimento_7 e estava ERRADA: aquele
+   arquivo tem o detail vazio e os numeros em variaveis, o que faz dele um
+   agregado, nao uma listagem. Ver AGREGADO abaixo. */
 const LISTAGEM = `<?xml version="1.0"?>
 <jasperReport name="listagem" pageWidth="595" pageHeight="842" columnWidth="557">
+${campos(75)}
+<variable name="SUM0" calculation="Sum"/>
+<group name="grupo1"/>
+<columnHeader><band height="11">${rotulos(6)}</band></columnHeader>
+<detail><band height="12">${exprCampos(["campo0", "campo1", "campo2"])}</band></detail>
+<columnFooter><band height="13"><textField><textFieldExpression><![CDATA[$V{SUM0}]]></textFieldExpression></textField></band></columnFooter>
+</jasperReport>`;
+
+/* Espelha o relconhecimento_7.jrxml de verdade: columnHeader com 6 rotulos,
+   detail VAZIO, 13 variaveis de soma exibidas nos groupFooter, 2 grupos,
+   75 campos declarados e so 2 exibidos. E o terceiro tipo. */
+const AGREGADO = `<?xml version="1.0"?>
+<jasperReport name="agregado" pageWidth="595" pageHeight="842" columnWidth="557">
 ${campos(75)}
 ${Array.from({ length: 13 }, (_, i) => `<variable name="SUM${i}" calculation="Sum"/>`).join("")}
 <group name="grupo1"/><group name="CFOP"/>
 <columnHeader><band height="11">${rotulos(6)}</band></columnHeader>
 <detail><band height="0"/></detail>
-<groupFooter><band height="13"><textField><textFieldExpression>$V{SUM0}</textFieldExpression></textField></band></groupFooter>
+<groupHeader><band height="14">${exprCampos(["campo20"])}</band></groupHeader>
+<groupFooter><band height="13">${exprCampos(["campo40"])}<textField><textFieldExpression><![CDATA[$V{SUM0}]]></textFieldExpression></textField></band></groupFooter>
+<summary><band height="11"><textField><textFieldExpression><![CDATA[$V{SUM1}]]></textFieldExpression></textField></band></summary>
 </jasperReport>`;
 
 /* Espelha o pessoa_imprimir_3.jrxml: sem columnHeader, detail com 89 rotulos
@@ -104,8 +128,28 @@ console.log("\nClassificacao ficha / listagem");
   const c = jrxml.classificarLayout(LISTAGEM);
   checar("listagem com 75 campos nao e confundida com ficha", c.tipo === "listagem", `veio "${c.tipo}"`);
   checar("sinais da listagem conferem",
-    c.sinais.rotulosColHeader === 6 && c.sinais.totalizadores === 13 && c.sinais.grupos === 2,
+    c.sinais.rotulosColHeader === 6 && c.sinais.camposNoDetail === 3,
     JSON.stringify(c.sinais));
+}
+{
+  /* ⚠️ O terceiro tipo, e a falta dele me fez dizer ao usuario que o
+     relconhecimento_7 era "listagem, o montador atende". O corpo e TOTAIS por
+     grupo: passar isso pelo montador devolve um relatorio valido e
+     estruturalmente diferente do que o cliente usa. */
+  const c = jrxml.classificarLayout(AGREGADO);
+  checar("relatorio de totais agrupados NAO e classificado como listagem",
+    c.tipo === "agregado", `veio "${c.tipo}"`);
+  checar("detail vazio de campo e o sinal, nao a contagem de grupos",
+    c.sinais.camposNoDetail === 0 && c.sinais.variaveisExibidas === 2,
+    JSON.stringify(c.sinais));
+  checar("declara 75 campos e exibe 2: declarar nao e exibir",
+    c.sinais.campos === 75 && c.sinais.camposExibidos.length === 2,
+    JSON.stringify(c.sinais.camposExibidos));
+
+  const r = jrxml.resumir(AGREGADO, { caminho: "agregado.jrxml" });
+  checar("o agregado manda CONFIRMAR antes de gerar", /Nao gere sem confirmar/.test(r));
+  checar("o agregado diz que o montador nao reproduz isso", /NAO reproduz este/.test(r));
+  checar("o agregado nao manda chamar a ferramenta", !/Chame a ferramenta AGORA/.test(r));
 }
 {
   const c = jrxml.classificarLayout(FICHA);
@@ -123,6 +167,40 @@ console.log("\nClassificacao ficha / listagem");
 {
   const vazio = jrxml.classificarLayout('<jasperReport name="x"/>');
   checar("arquivo sem sinal nenhum fica indefinido, nao palpita", vazio.tipo === "indefinido");
+}
+{
+  /* ⚠️ Regressao medida ANTES de subir: `nfs-listagem.jrxml` caiu em "agregado"
+     por causa de duas variaveis que NENHUM relatorio escapa de ter. O
+     JasperReports injeta PAGE_NUMBER e companhia sozinho e ninguem as declara;
+     contar todo `$V{}` exibido transformava rodape com numero de pagina em
+     prova de agregacao. Agregacao de verdade e <variable calculation="...">
+     escrita no arquivo. */
+  const SO_NUMERO_DE_PAGINA = `<?xml version="1.0"?>
+<jasperReport name="rodape-comum" pageWidth="595" pageHeight="842">
+${campos(30)}
+<columnHeader><band height="11">${rotulos(4)}</band></columnHeader>
+<detail><band height="12">${exprCampos(["campo0", "campo1"])}</band></detail>
+<pageFooter><band height="20">
+  <textField><textFieldExpression><![CDATA[$V{PAGE_NUMBER}]]></textFieldExpression></textField>
+  <textField><textFieldExpression><![CDATA[$V{MASTER_CURRENT_PAGE}]]></textFieldExpression></textField>
+</band></pageFooter>
+</jasperReport>`;
+  const c = jrxml.classificarLayout(SO_NUMERO_DE_PAGINA);
+  checar("numero de pagina no rodape NAO faz de um relatorio um agregado",
+    c.tipo === "listagem", `veio "${c.tipo}"`);
+  checar("variavel nao declarada com calculation nao conta como agregacao",
+    c.sinais.variaveisExibidas === 0, JSON.stringify(c.sinais.variaveis));
+
+  // E a declarada conta, mesmo sendo uma so.
+  const comSoma = SO_NUMERO_DE_PAGINA
+    .replace("<columnHeader>", '<variable name="TOTAL" calculation="Sum"/><columnHeader>')
+    .replace('<detail><band height="12">', '<detail><band height="0">')
+    .replace(exprCampos(["campo0", "campo1"]), "")
+    .replace("</band></pageFooter>",
+      '<textField><textFieldExpression><![CDATA[$V{TOTAL}]]></textFieldExpression></textField></band></pageFooter>');
+  checar("uma agregacao declarada e exibida, com detail vazio, e agregado",
+    jrxml.classificarLayout(comSoma).tipo === "agregado",
+    JSON.stringify(jrxml.classificarLayout(comSoma).sinais));
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -159,6 +237,16 @@ console.log("\nSecao \"O que fazer\" no resumo");
   const semCaminho = jrxml.resumir(LISTAGEM);
   checar("sem caminho a instrucao nao inventa um",
     /herdarDe: o caminho do arquivo que voce leu/.test(semCaminho));
+}
+{
+  /* ⚠️ Pedido generico ("coloque no padrao a2o") fez o modelo inventar
+     `numero`, `descricao` e `valorTotal`. Quando ninguem diz quais colunas, as
+     certas sao as que o original ja exibe, e isso esta no arquivo. */
+  const r = jrxml.resumir(LISTAGEM, { caminho: "l.jrxml" });
+  checar("a instrucao entrega as colunas que o original ja exibe",
+    /use as que o original ja exibe: campo0, campo1, campo2/.test(r), r.slice(-700));
+  checar("e avisa para nao inventar nome generico",
+    /Nao invente nome generico como "numero" ou "valorTotal"/.test(r));
 }
 
 // ─────────────────────────────────────────────────────────────
