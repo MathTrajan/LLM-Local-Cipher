@@ -491,12 +491,27 @@ async function resolverConversa(chamar, messages, { forcar = false, rotulo = "",
      pergunta so. Ver executarLeituras(). */
   for (let rodada = 0; rodada < MAX_RODADAS_LEITURA; rodada++) {
     const pedidas = result.toolCalls || [];
-    const soLeitura = pedidas.length > 0 && pedidas.every((tc) => !arquivos.escreveNoDisco(tc.nome));
-    if (!soLeitura) break;
+    const leiturasPedidas = pedidas.filter((tc) => !arquivos.escreveNoDisco(tc.nome));
+    if (!leiturasPedidas.length) break;
 
-    const leituras = await executarLeituras(pedidas);
+    /* ⚠️ A condicao era `every` (SO leitura) e isso deixava passar o caso mais
+       comum do fluxo real. Medido em 2026-11-03, com um .jrxml de pedido:
+       o modelo propos `ler_arquivo` E `gerar_relatorio_a2o` no MESMO turno, com
+       as colunas `id`, `nome`, `quantidade`, `precoUnitario` -- todas deduzidas
+       do NOME do arquivo, nenhuma existente (o arquivo exibe `material`,
+       `vlrUnitario`, `vlrTotal`). Como nao era "so leitura", o laco nao rodava,
+       o modelo nunca via a especificacao e a geracao era montada no escuro.
+       Agora basta UMA leitura pedida: ela e executada e a pergunta volta com o
+       conteudo. A escrita proposta junto e DESCARTADA de proposito, porque foi
+       decidida sem o dado que a leitura ia trazer. Nada se perde: proposta nao
+       e execucao, e a rodada seguinte propoe de novo, agora informada. */
+    const escritasDescartadas = pedidas.length - leiturasPedidas.length;
+    const leituras = await executarLeituras(leiturasPedidas);
     if (!leituras.length) break;
-    console.log(`[Cipher] laco de leitura${rotulo}: ${leituras.map((l) => l.nome).join(", ")}`);
+    console.log(
+      `[Cipher] laco de leitura${rotulo}: ${leituras.map((l) => l.nome).join(", ")}` +
+      (escritasDescartadas ? ` (descartei ${escritasDescartadas} escrita proposta no escuro)` : "")
+    );
 
     messages.push({ role: "assistant", content: result.text || "" });
     messages.push(mensagemDeLeitura(leituras));

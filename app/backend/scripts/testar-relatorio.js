@@ -484,6 +484,28 @@ const PEDIDOS_QUE_NAO_DEVEM_FORCAR = [
   }
 
   {
+    /* ⚠️ O caso mais comum do fluxo real, e o que mais custou: o modelo propoe
+       LEITURA e ESCRITA no mesmo turno. A condicao era `every` (so leitura),
+       entao o laco nao rodava, ele nunca via a especificacao e a escrita saia
+       com campos deduzidos do nome do arquivo. Medido em 2026-11-03. */
+    const chamadas = [];
+    const respostas = [
+      { text: "", toolCalls: [
+        { id: "1", nome: "ler_arquivo", argumentos: { caminho: "x.jrxml" } },
+        { id: "2", nome: "gerar_relatorio_a2o", argumentos: { saida: "no-escuro.jrxml" } },
+      ] },
+      { text: "", toolCalls: [{ id: "3", nome: "gerar_relatorio_a2o", argumentos: { saida: "informado.jrxml" } }] },
+    ];
+    const chamar = async () => { chamadas.push(1); return respostas[chamadas.length - 1]; };
+    const r = await agent.resolverConversa(chamar, [{ role: "user", content: "x" }], { forcar: false });
+    checar("leitura junto com escrita: executa a leitura e pergunta de novo",
+      chamadas.length === 2, `chamadas: ${chamadas.length}`);
+    checar("a escrita proposta no escuro e descartada",
+      (r.toolCalls || []).length === 1 && r.toolCalls[0].argumentos.saida === "informado.jrxml",
+      JSON.stringify(r.toolCalls));
+  }
+
+  {
     // Modelo insiste em texto mesmo forcado: o usuario tem que ser avisado.
     const avisado = [];
     const chamar = async () => ({ text: "Aqui está o arquivo gerado.", toolCalls: [] });
