@@ -353,12 +353,22 @@ body {
 }
 @keyframes surgir { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
-/* O nucleo encolheu de ~760px para 150px. Continua sendo a identidade, mas como
-   assinatura e nao como cenario: a tela inicial agora PERGUNTA, e a pergunta e
-   que tem de ser lida primeiro. Menor tambem significa muito menos GPU, que e o
-   recurso disputado com a inferencia do proprio modelo. */
+/* O nucleo encolheu de ~760px para 150px em 31/10/2026, e voltou 30% em
+   03/11 (150 -> 195, e 116 -> 151 no celular). Continua sendo assinatura e nao
+   cenario: a tela inicial PERGUNTA, e a pergunta e que tem de ser lida
+   primeiro. 195px ainda cabe acima do titulo sem empurrar o input.
+
+   ⚠️ Mexer SO nesta variavel escala a cena inteira. Os raios, as faixas do
+   disco, a poeira e a lente moram num sistema logico de 600x600 dentro do
+   `initNucleoOrbital`, e `ajustarEscala()` resolve a conta `px / SIZE` num
+   `setTransform`. Nao ha numero de raio em px para acompanhar aqui.
+
+   O custo e quadratico, nao linear: o buffer do canvas e `lado x dpr` ao
+   quadrado, entao +30% de lado e +69% de pixel pintado por quadro. Isso disputa
+   GPU com a inferencia APENAS quando o Jarvis esta aberto no proprio Mac; no
+   celular quem paga e o celular e o modelo nem sabe. */
 .sphere-wrap {
-  --esfera: 150px;
+  --esfera: 195px;
   position: relative; width: var(--esfera); height: var(--esfera); flex-shrink: 0;
 }
 #neural-sphere { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; }
@@ -620,7 +630,7 @@ body {
 }
 
 @media (max-width: 560px) {
-  .sphere-wrap { --esfera: 116px; }
+  .sphere-wrap { --esfera: 151px; }   /* mesmos 30% do valor de desktop */
   .welcome-titulo { font-size: 23px; }
   .message-wrapper.assistant .message-content { font-size: 16px; }
   /* Com ~178px de textarea o contador rouba espaco do placeholder. Com o campo
