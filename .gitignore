@@ -7,6 +7,10 @@ node_modules/
 # Editor / IDE
 .idea/
 
+# Lixo do Finder. O .gitignore de jarvis-chat-export/ ja cobria la dentro; na
+# raiz faltava, e o arquivo apareceu como nao rastreado na varredura de 03/11.
+.DS_Store
+
 # Backups e arquivo morto locais — contem chaves reais, nunca versionar
 _arquivo-local/
 
