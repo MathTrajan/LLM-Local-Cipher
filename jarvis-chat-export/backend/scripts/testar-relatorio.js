@@ -469,6 +469,52 @@ const PEDIDOS_QUE_NAO_DEVEM_FORCAR = [
     });
     checar("sem coluna nenhuma continua recusado", res.codigo === "SEM_COLUNAS");
   }
+  {
+    /* ⚠️ O defeito que nem o validador de XML nem o de padrao A2O pegam: o
+       arquivo fica perfeito e as colunas apontam para campo que nao existe.
+       Medido no arquivo que o usuario quase mandou para o cliente: rotulos
+       certos, e o detalhe referenciando $F{G}, $F{dt} e $F{op}. */
+    const inventado = await gerar({
+      saida: "campo-inventado-a2o.jrxml", nome: "x", campos: CONTRATO,
+      colunas: [
+        { titulo: "Tomador", campo: "G" },
+        { titulo: "Data", campo: "dt" },
+        { titulo: "Operacao", campo: "campo3" },
+      ],
+    });
+    checar("recusa coluna apontando para campo que nao existe",
+      inventado.codigo === "CAMPO_INEXISTENTE", `veio ${inventado.codigo}`);
+    checar("o erro nomeia os campos errados e o lugar deles",
+      /G \(coluna "Tomador"\)/.test(inventado.mensagem || "") &&
+      /dt \(coluna "Data"\)/.test(inventado.mensagem || ""), inventado.mensagem);
+    checar("o erro lista os campos disponiveis, senao o modelo adivinha de novo",
+      /Disponiveis \(20\): campo0, campo1/.test(inventado.mensagem || ""), inventado.mensagem);
+
+    // KPI, total, agrupamento e grafico entram na mesma checagem.
+    for (const [rotulo, extra] of [
+      ["KPI", { kpis: [{ rotulo: "Total", campo: "naoExiste", calculo: "Sum" }] }],
+      ["total do rodape", { totais: [{ coluna: "naoExiste", calculo: "Sum" }] }],
+      ["agruparPor", { agruparPor: "naoExiste" }],
+      ["grafico", { grafico: { tipo: "barra", categoria: "naoExiste", valor: "campo1" } }],
+    ]) {
+      const res = await gerar({
+        saida: `ref-${rotulo.replace(/\W+/g, "-")}-a2o.jrxml`, nome: "x",
+        campos: CONTRATO, colunas: COLUNAS_OK, ...extra,
+      });
+      checar(`${rotulo} com campo inexistente tambem e recusado`,
+        res.codigo === "CAMPO_INEXISTENTE", `veio ${res.codigo}`);
+    }
+
+    // E o caminho feliz segue passando: tudo referenciando campo do contrato.
+    const bom = await gerar({
+      saida: "tudo-valido-a2o.jrxml", nome: "x", campos: CONTRATO, colunas: COLUNAS_OK,
+      kpis: [{ rotulo: "Total", campo: "campo4", calculo: "Count" }],
+      totais: [{ coluna: "campo2", calculo: "Sum" }],
+      agruparPor: "campo0",
+    });
+    checar("referencia toda valida grava sem reclamar", bom.codigo === "OK",
+      `${bom.codigo}: ${bom.mensagem || ""}`);
+  }
 
   console.log(`\nRESULTADO: ${ok} ok, ${falhas} falha(s)`);
   process.exit(falhas ? 1 : 0);

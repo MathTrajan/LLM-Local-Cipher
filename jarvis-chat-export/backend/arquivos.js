@@ -718,6 +718,40 @@ async function gerarRelatorioA2O(spec = {}) {
     );
   }
 
+  /* ⚠️ Toda referencia a campo tem de EXISTIR no contrato, e isto nao e
+     preciosismo: e o unico defeito desta serie que o validador de XML e o de
+     padrao A2O nao pegam, porque o arquivo fica perfeito.
+     Medido em 2026-11-03, no arquivo que o usuario quase baixou e mandou para o
+     cliente: os rotulos sairam certos ("Tomador", "Data", "Operacao") e o
+     detalhe referenciava $F{G}, $F{dt} e $F{op}, nomes que o modelo inventou.
+     O contrato herdado tinha razaoSocialTomador e dataEmitido. O JasperReports
+     emitiria colunas vazias ou falharia no cliente, e nada aqui acusava.
+     A lista de campos disponiveis vai na mensagem de erro de proposito: sem
+     ela o modelo tenta adivinhar de novo e erra igual. */
+  {
+    const nomes = new Set((spec.campos || []).map((c) => String(c.nome)));
+    const refs = [
+      ...(spec.colunas || []).map((c) => ({ onde: `coluna "${c.titulo || c.campo}"`, campo: c.campo })),
+      ...(spec.kpis || []).map((k) => ({ onde: `KPI "${k.rotulo || k.campo}"`, campo: k.campo })),
+      ...(spec.totais || []).map((t) => ({ onde: "total do rodape", campo: t.coluna })),
+      ...(spec.agruparPor ? [{ onde: "agruparPor", campo: spec.agruparPor }] : []),
+      ...(spec.grafico?.categoria ? [{ onde: "categoria do grafico", campo: spec.grafico.categoria }] : []),
+      ...(spec.grafico?.valor ? [{ onde: "valor do grafico", campo: spec.grafico.valor }] : []),
+    ].filter((r) => r.campo);
+
+    const invalidas = refs.filter((r) => !nomes.has(String(r.campo)));
+    if (invalidas.length) {
+      const amostra = [...nomes].slice(0, 25).join(", ");
+      throw new ErroArquivo(
+        `Estes campos nao existem no contrato: ` +
+          invalidas.map((r) => `${r.campo} (${r.onde})`).join("; ") +
+          `. Use SO nomes do contrato. Disponiveis (${nomes.size}): ${amostra}` +
+          (nomes.size > 25 ? ", ..." : ""),
+        "CAMPO_INEXISTENTE"
+      );
+    }
+  }
+
   const saida = String(spec.saida || "").trim();
   if (!saida) throw new ErroArquivo("Informe o nome do arquivo de saida (.jrxml).", "SEM_SAIDA");
   if (!saida.toLowerCase().endsWith(".jrxml")) {

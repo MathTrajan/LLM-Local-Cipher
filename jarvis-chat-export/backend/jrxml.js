@@ -517,6 +517,13 @@ function instrucaoDeUso(xml, caminho) {
       `arquivo que o usuario enviou, e o montador recusa.\n` +
       `- colunas: so as que o pedido exige, de 2 a 14 (acima de 8 vira paisagem). ` +
       `Uma coluna so e recusado: tabela de uma coluna nao mostra nada.\n` +
+      /* ⚠️ Medido em 2026-11-03: os rotulos sairam certos e o `campo` de cada
+         coluna veio inventado ($F{G}, $F{dt}, $F{op}). Rotulo e texto livre;
+         `campo` e chave do dataset e tem de ser copiado letra por letra. */
+      `  O "campo" de cada coluna, KPI, total, agruparPor e grafico precisa ser ` +
+      `um nome COPIADO da lista "## Campos" acima, letra por letra. Nome ` +
+      `abreviado ou inventado e recusado: $F{G} nao existe, razaoSocialTomador ` +
+      `existe. O rotulo pode ser livre; o campo nao.\n` +
       `Os ${sinais.campos} campos listados acima sao o dataset inteiro, NAO ` +
       `${sinais.campos} colunas.`
     );
