@@ -1,5 +1,5 @@
 /* ════════════════════════════════════════════════
-   J.A.R.V.I.S — Neural Core v5.0 · app.js
+   J.A.R.V.I.S — Orbital Core v6.0 · app.js
    ════════════════════════════════════════════════ */
 
 const API_BASE    = window.location.origin;
@@ -11,6 +11,8 @@ const MAX_FATOS   = 60;                 // mesmo teto que o backend aceita
 
 const state = {
   isLoading: false,
+  // Arquivos ja enviados ao servidor e ainda nao anexados a uma mensagem.
+  anexos: [],
   sessionStart: Date.now(),
   conversas: [],           // [{ id, titulo, mensagens, history, criadaEm, atualizadaEm }]
   idAtual: null,           // null = tela inicial do Jarvis, fora de qualquer conversa
@@ -31,6 +33,10 @@ const DOM = {
   charCounter:       () => document.getElementById("char-counter"),
   btnClearChat:      () => document.getElementById("btn-clear-chat"),
   btnMenuToggle:     () => document.getElementById("btn-menu-toggle"),
+  btnAnexo:          () => document.getElementById("btn-anexo"),
+  fileInput:         () => document.getElementById("file-input"),
+  inputContainer:    () => document.querySelector(".input-container"),
+  anexosBarra:       () => document.getElementById("anexos-barra"),
   leftSidebar:       () => document.getElementById("left-sidebar"),
   toastContainer:    () => document.getElementById("toast-container"),
   liveTime:          () => document.getElementById("live-time"),
@@ -235,7 +241,7 @@ function abrirConversa(id) {
   DOM.messagesArea()?.classList.remove("welcome-mode");
   DOM.navJarvis()?.classList.remove("active");
 
-  for (const m of conv.mensagens) renderMessage(m.role, m.text, m.time, m.fontes);
+  for (const m of conv.mensagens) renderMessage(m.role, m.text, m.time, m.fontes, m.anexos);
   renderListaConversas();
 
   const area = DOM.messagesArea();
@@ -419,7 +425,15 @@ async function refreshSystemStatus() {
     // "b10240-0b14b87d7" -> "llama.cpp b10240": o hash do commit nao cabe e nao
     // diz nada de util aqui; fica no title.
     const build = info.motor ? String(info.motor).split("-")[0] : null;
-    elMotor.textContent = build ? `llama.cpp ${build}` : "—";
+    /* Mostra ONDE a inferencia esta rodando junto do build. Quando o Jarvis
+       cai para o segundo endpoint (modelo menor, no servidor) a qualidade da
+       resposta muda, e sem este rotulo a diferenca apareceria sem explicacao. */
+    /* ⚠️ A variavel desta funcao e `health`, nao `dados`. Escrever o nome
+       errado aqui passa no `node --check` e estoura como ReferenceError em
+       runtime, dentro de um bloco que roda a cada 2 min: foi exatamente assim
+       que o chat inteiro quebrou em 01/11. */
+    const onde = health?.endpoint && (health?.endpoints || []).length > 1 ? ` · ${health.endpoint}` : "";
+    elMotor.textContent = build ? `llama.cpp ${build}${onde}` : (health?.endpoint || "—");
     elMotor.title = info.motor
       ? `llama.cpp build ${info.motor}${info.slots ? ` · ${info.slots} slots` : ""}`
       : "Motor de inferencia";
@@ -616,7 +630,12 @@ function showToast(msg, type = "info") {
 function updateCharCounter(len) {
   const el = DOM.charCounter(); if (!el) return;
   el.textContent = `${len}/8000`;
-  el.className = len > 7500 ? "char-counter danger" : len > 6000 ? "char-counter warning" : "char-counter";
+  const estado = len > 7500 ? " danger" : len > 6000 ? " warning" : "";
+  // `tem-texto` libera os 46px do contador para o placeholder enquanto o campo
+  // esta vazio, mas SO em tela estreita (ver a media query no style.css). Com
+  // 390px de viewport o textarea fica com ~126px e "Pergunte qualquer coisa..."
+  // cortava no meio.
+  el.className = `char-counter${estado}${len > 0 ? " tem-texto" : ""}`;
 }
 
 /* ─── Markdown ───────────────────────────────── */
@@ -695,7 +714,7 @@ async function copyText(text) {
  * E a base tanto da mensagem pronta (renderMessage) quanto do streaming, em
  * que a bolha nasce vazia e cresce a cada token.
  */
-function criarBolha(role, time) {
+function criarBolha(role, time, anexos) {
   const area = DOM.messagesArea();
   // Esconde, nao remove: a tela inicial precisa voltar sem reinicializar a esfera 3D.
   const ws   = DOM.welcomeScreen();
@@ -715,6 +734,19 @@ function criarBolha(role, time) {
   const meta = document.createElement("div");
   meta.className = "message-meta";
   meta.textContent = t;
+
+  /* ⚠️ Os anexos vao antes da bolha, dentro do `content`, e NAO dentro da
+     `bubble`. Motivo medido em 2026-11-03: `refs.atualizar()` faz
+     `bubble.innerHTML = parseMarkdown(texto)` a cada token do streaming, o que
+     apagava o chip no primeiro delta. O sintoma era cruel: o anexo persistia no
+     localStorage, a barra limpava certo, e so o chip sumia, sem erro nenhum.
+     Fora da bubble, ele sobrevive a qualquer reescrita do texto. */
+  if (anexos && anexos.length) {
+    const barra = document.createElement("div");
+    barra.className = "message-anexos";
+    for (const a of anexos) barra.appendChild(montarChipAnexo(a, false));
+    contentDiv.appendChild(barra);
+  }
 
   contentDiv.appendChild(bubble);
   contentDiv.appendChild(meta);
@@ -905,10 +937,22 @@ function mostrarSaidaDaAcao(card, data) {
   pre.className = "acao-saida";
   pre.textContent = texto;
   card.appendChild(pre);
+
+  /* Botao de baixar, quando a acao produziu um arquivo. E o fim do fluxo
+     "envio um .jrxml, recebo outro pronto": sem ele o arquivo gerado ficaria
+     so na sandbox do servidor, inalcancavel pelo navegador. */
+  if (r && r.caminho && /\.(jrxml|xml|md|txt|csv|json|py|sql)$/i.test(r.caminho)) {
+    const baixar = document.createElement("a");
+    baixar.className = "acao-btn confirmar acao-baixar";
+    baixar.href = `${API_BASE}/api/arquivos/baixar?caminho=${encodeURIComponent(r.caminho)}`;
+    baixar.setAttribute("download", "");
+    baixar.textContent = `Baixar ${r.caminho}`;
+    card.appendChild(baixar);
+  }
 }
 
-function renderMessage(role, text, time, fontes) {
-  const bolha = criarBolha(role, time);
+function renderMessage(role, text, time, fontes, anexos) {
+  const bolha = criarBolha(role, time, anexos);
   bolha.atualizar(text);
   bolha.mostrarFontes(fontes);
   return bolha.time;
@@ -953,8 +997,20 @@ async function lerSse(body, onEvento) {
 /* ─── Send ───────────────────────────────────── */
 async function sendMessage() {
   const input = DOM.messageInput();
-  const msg   = input?.value.trim();
-  if (!msg || state.isLoading) return;
+  let msg     = input?.value.trim();
+  const anexos = [...state.anexos];
+  if ((!msg && !anexos.length) || state.isLoading) return;
+
+  /* ⚠️ Os nomes dos anexos entram NO TEXTO da mensagem, e nao so no objeto da
+     bolha. O modelo nao ve o estado do front: sem citar o nome no texto, ele
+     nao tem como saber que existe arquivo para ler, e responderia perguntando
+     qual arquivo. */
+  if (anexos.length) {
+    const lista = anexos.map((a) => a.nome).join(", ");
+    msg = msg
+      ? `${msg}\n\n(arquivo anexado: ${lista})`
+      : `Leia o arquivo ${lista} e me diga o que ele e e o que da para fazer com ele.`;
+  }
 
   // Corta a leitura da resposta anterior: pergunta nova cala a voz da antiga.
   voz.parar();
@@ -976,8 +1032,11 @@ async function sendMessage() {
     DOM.navJarvis()?.classList.remove("active");
   }
 
-  const time = renderMessage("user", msg);
-  conv.mensagens.push({ role: "user", text: msg, time });
+  const time = renderMessage("user", msg, null, null, anexos);
+  conv.mensagens.push({ role: "user", text: msg, time, anexos });
+  // Consumidos: o chip some da barra agora que virou parte da mensagem.
+  state.anexos = [];
+  renderAnexos();
   conv.atualizadaEm = Date.now();
   salvarConversas();
   renderListaConversas();
@@ -1391,11 +1450,29 @@ function criarMiniGlobo() {
   let rafId = null, T0 = 0, proxima = 0;
   const ondas = [];
 
+  /* ⚠️ Esta declaracao faltou e derrubou o chat inteiro em 2026-10-31.
+     A correcao do canvas foi aplicada com um replace que casou nas DUAS funcoes
+     de escala (esta e a do nucleo), mas a variavel so foi declarada na outra.
+     Resultado: `ReferenceError: pxAtual is not defined` dentro de
+     `mostrarDigitando()`, que roda em `setLoading()`, que roda ao ENVIAR. A
+     excecao subia antes do fetch, entao a pergunta aparecia na tela, a conversa
+     era criada e a resposta nunca vinha. O sintoma ("mandei ola e nao
+     respondeu") parecia lentidao do modelo, e o modelo estava respondendo em
+     0,8 s o tempo todo.
+     Licao: alteracao em canvas tem de ser verificada NO NAVEGADOR, e nao so com
+     `node --check` -- ReferenceError e erro de execucao, nao de sintaxe. */
+  let pxAtual = 0;
+
   function escala() {
     const css = canvas.offsetWidth || 36;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const px  = Math.round(css * dpr);
-    if (canvas.width === px) return;
+    // Compara com variavel e nao com `canvas.width`: um canvas sem width
+    // atribuido nasce 300x150, e quando a conta da exatamente 300 a comparacao
+    // com canvas.width dava igual na primeira chamada, a funcao retornava antes
+    // do setTransform e o buffer ficava com height 150.
+    if (pxAtual === px) return;
+    pxAtual = px;
     canvas.width = canvas.height = px;
     ctx.setTransform(px / SIZE, 0, 0, px / SIZE, 0, 0);
   }
@@ -1410,7 +1487,7 @@ function criarMiniGlobo() {
     }
 
     ctx.save();
-    ctx.shadowColor = "rgba(0,255,157,0.7)";
+    ctx.shadowColor = "rgba(255,170,70,0.7)";
     ctx.shadowBlur = 6;
     ctx.lineWidth = 1;
     for (let i = ondas.length - 1; i >= 0; i--) {
@@ -1420,7 +1497,7 @@ function criarMiniGlobo() {
 
       // Alcance ate R*1.62: passar disso encostaria na borda dos 36px do canvas.
       const rr = R * (1 + p * 0.62);
-      ctx.strokeStyle = `rgba(0,255,157,${(1 - p) * (1 - p) * 0.85})`;
+      ctx.strokeStyle = `rgba(255,180,90,${(1 - p) * (1 - p) * 0.85})`;
       ctx.beginPath();
       for (let s = 0; s <= 48; s++) {
         const a = (s / 48) * Math.PI * 2;
@@ -1435,11 +1512,11 @@ function criarMiniGlobo() {
     ctx.restore();
 
     const rotY = t * 0.9;
-    ctx.strokeStyle = "rgba(0,217,255,0.85)";
+    ctx.strokeStyle = "rgba(255,138,31,0.85)";
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.arc(CX, CY, R, 0, Math.PI * 2); ctx.stroke();
 
-    ctx.strokeStyle = "rgba(0,217,255,0.38)";
+    ctx.strokeStyle = "rgba(255,138,31,0.38)";
     ctx.lineWidth = 0.7;
     for (let l = 1; l <= 2; l++) {
       const pl = (l / 3) * Math.PI;
@@ -1455,7 +1532,7 @@ function criarMiniGlobo() {
       ctx.stroke();
     }
 
-    ctx.fillStyle = "rgba(0,255,157,0.9)";
+    ctx.fillStyle = "rgba(255,225,170,0.9)";
     ctx.beginPath(); ctx.arc(CX, CY, 1.6 + Math.sin(t * 4) * 0.5, 0, Math.PI * 2); ctx.fill();
 
     rafId = requestAnimationFrame(frame);
@@ -1478,485 +1555,1299 @@ function criarMiniGlobo() {
   };
 }
 
-/* ─── Background particles ───────────────────── */
-function initParticles() {
-  const canvas = document.getElementById("bg-particles"); if (!canvas) return;
+/* ═══════════════════════════════════════════════════════════
+   CAMPO ESTELAR — fundo que continua a cena do nucleo
+   ═══════════════════════════════════════════════════════════
+   Substituiu as 65 bolinhas laranja com rebote nas bordas (2026-10-31). O
+   rebote era o problema: ponto que bate na borda e volta DENUNCIA onde o canvas
+   acaba, e o canvas e um retangulo em cima do fundo preto. Aqui nada bate em
+   nada — o campo e polar, centrado na tela, e some por alfa antes de chegar na
+   borda.
+
+   Tres coisas desenhadas por quadro, nesta ordem:
+
+     1. nebulosa (cache offscreen, um blit) — poeira em brasa, deriva lenta
+     2. estrelas em 3 camadas de paralaxe   — espiral para dentro + cintilacao
+     3. mascara de alfa em `destination-out` — dissolve no preto
+
+   O passo 3 e o que casa com o resto da tela. A `.bg-radial` do CSS ja escurece
+   as beiradas, mas ela fica ATRAS deste canvas (ordem do index.html), entao sem
+   a mascara as estrelas apareceriam por cima do vinhetado e o retangulo ficaria
+   visivel. A mascara apaga pelas bordas E pelo centro: o centro e onde mora o
+   nucleo, e estrela passando por tras do buraco negro competiria com ele.
+
+   Coerencia com o `initNucleoOrbital`: tudo deriva para DENTRO, em espiral, como
+   se a tela inteira estivesse caindo no mesmo poco gravitacional. A camada
+   distante anda mais devagar e mais apagada; a proxima, mais rapida e mais
+   brilhante. E paralaxe de verdade, nao ruido aleatorio.
+
+   Para ajustar a olho, mexa so no CAMPO_ESTELAR logo abaixo: sao os cinco
+   numeros que mudam a intensidade e o ritmo sem mexer na mecanica. */
+const CAMPO_ESTELAR = {
+  /* Alfa maximo de uma estrela no pico da cintilacao. Teto deliberadamente
+     baixo: isto passa por tras do texto do chat. */
+  estrelas: 0.46,
+  /* Multiplicador global da nebulosa. Acima de ~1.4 ela deixa de ler como
+     poeira e vira mancha de gradiente. */
+  nebulosa: 0.9,
+  /* px² de TELA por estrela. MAIOR = MENOS estrelas. A conta e sobre a area do
+     DISCO (meia diagonal), nao do retangulo, porque o campo e polar: boa parte
+     das estrelas esta fora da tela a qualquer momento. */
+  densidade: 14000,
+  /* Multiplica toda a velocidade: deriva, rotacao, cintilacao e respiro da
+     nebulosa. 1 e o calibrado; 0.5 deixa quase parado. */
+  velocidade: 1,
+  /* Quadros por segundo do fundo. Nada aqui se move mais de ~3 px/s, entao 30
+     fps e indistinguivel de 60 e corta metade do trabalho — este app abre num
+     Celeron de 2 nucleos e em celular. */
+  fps: 30,
+};
+
+function initCampoEstelar() {
+  const canvas = document.getElementById("bg-particles");
+  if (!canvas) return;
   const ctx = canvas.getContext("2d");
-  let W, H, pts;
-  const resize = () => { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; };
-  const mkPt   = () => ({ x:Math.random()*W, y:Math.random()*H, vx:(Math.random()-.5)*.22, vy:(Math.random()-.5)*.22, a:Math.random()*.35+.08 });
-  resize(); pts = Array.from({ length: 65 }, mkPt);
-  window.addEventListener("resize", resize);
-  (function draw() {
-    ctx.clearRect(0, 0, W, H);
-    for (const p of pts) {
-      ctx.beginPath(); ctx.arc(p.x, p.y, .75, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(0,217,255,${p.a})`; ctx.fill();
-      p.x += p.vx; p.y += p.vy;
-      if (p.x < 0 || p.x > W) p.vx *= -1;
-      if (p.y < 0 || p.y > H) p.vy *= -1;
+  const I = CAMPO_ESTELAR;
+
+  /* ⚠️ Canvas em resolucao REDUZIDA, e sem devicePixelRatio.
+     O `inset: 0` do CSS estica o canvas para a viewport inteira qualquer que
+     seja o tamanho do buffer, entao desenhar em 75% e deixar o navegador ampliar
+     custa 56% dos pixels. Isso importa porque cada quadro faz tres operacoes de
+     tela cheia (clear, blit da nebulosa, blit da mascara): em 1920x1080 nativo
+     seriam ~24 MB de pixel por quadro, que o Celeron N2807 nao entrega sem
+     engasgar quando o canvas cai em rasterizacao por software.
+
+     Da para fazer isso aqui porque o conteudo e borrao suave mais ponto de 1 px:
+     a ampliacao do navegador so deixa a estrela mais macia, o que ate ajuda. O
+     nucleo usa dpr cheio pelo motivo oposto (la existe geometria com borda).
+
+     Consequencia para quem for mexer: TODA coordenada daqui para baixo esta em
+     pixel de BUFFER, nao de tela. `vr` das camadas e `densidade` sao as duas
+     excecoes, declaradas em pixel de tela e convertidas no uso, para que mudar
+     ESCALA nao mude a velocidade nem a densidade percebidas. */
+  const ESCALA = 0.75;
+  let vpW = 0, vpH = 0;             // viewport, so para decidir o que refazer
+  let W = 0, H = 0, cx = 0, cy = 0;
+  let rMin = 0, rMax = 0;          // limites radiais do campo, em px
+  let nebulosa = null, mascara = null;
+  let estrelas = [];
+
+  /* ─── Camadas de paralaxe ───
+     `vr` em px de TELA por segundo para dentro, `giro` em rad/s. Os numeros sao
+     pequenos de proposito: a camada proxima leva ~4 min para atravessar uma tela
+     de notebook e a distante mais de 15. O movimento e percebido quando o olho
+     para numa estrela, nunca quando o olho esta lendo o chat. */
+  const CAMADAS = [
+    { peso: 0.56, vr: 0.80, giro: 0.0040, brilho: 0.42, tam: 1 },  // longe
+    { peso: 0.30, vr: 1.75, giro: 0.0075, brilho: 0.74, tam: 1 },  // meio
+    { peso: 0.14, vr: 3.10, giro: 0.0125, brilho: 1.00, tam: 2 },  // perto
+  ];
+
+  /* Tons de estrela, do branco quente ao tijolo. Nada de azul: a paleta do app
+     e brasa, e uma unica estrela azulada rouba a atencao da tela toda. */
+  const TONS = [
+    [255, 238, 212],
+    [255, 206, 152],
+    [255, 158,  78],
+    [206, 112,  52],
+  ];
+
+  /* Paleta pre-calculada: TONS × NIVEIS strings de rgba() prontas.
+     Montar `rgba(...)` por estrela por quadro criaria ~7 mil strings por segundo
+     só para o coletor de lixo recolher. Com a paleta, desenhar e indexar array. */
+  const NIVEIS = 10;
+  const PALETA = TONS.map(([r, g, b]) =>
+    Array.from({ length: NIVEIS }, (_, i) =>
+      `rgba(${r},${g},${b},${(((i + 1) / NIVEIS) * I.estrelas).toFixed(3)})`));
+
+  /* Achatamento vertical do campo. Levemente elipsoide para insinuar o mesmo
+     plano inclinado do disco de acrecao do nucleo. Exagerar aqui faz o campo
+     parecer esticado numa tela larga. */
+  const ACHATAMENTO = 0.94;
+
+  /* ─── Mascara de dissolucao ───
+     Duas coisas somadas, e a separacao em DOIS perfis e o ponto:
+
+     ⚠️ Um unico gradiente radial normalizado pela meia diagonal NAO serve, e
+     isso foi medido na conta antes de virar codigo. Em 390x844 (celular) a
+     beirada lateral fica a 0.42 da meia diagonal, ou seja, dentro da faixa
+     visivel: as estrelas chegariam coladas na borda esquerda e direita e o
+     retangulo do canvas apareceria. A dissolucao precisa ser medida em fracao
+     de CADA eixo, nao de um raio unico.
+
+     `PERFIL_BORDA` roda nos quatro lados (0 = beirada da tela, 1 = fim da faixa
+     de dissolucao). As faixas se sobrepoem nos cantos e o `source-over` soma os
+     alfas (a = a1 + a2(1-a1)), entao canto apaga mais que lado reto, que e
+     exatamente o que se quer.
+
+     `PERFIL_CENTRO` abre um buraco onde mora a sombra do buraco negro: ali
+     estrela nao existiria mesmo, estaria lenteada para fora. Fica de proposito
+     MENOR que o nucleo inteiro — o resto do disco deixa estrela aparecer no
+     meio das lacunas de poeira, e e isso que da continuidade entre as duas
+     cenas. */
+  const PERFIL_BORDA  = [[0.00, 1.00], [0.34, 0.52], [0.68, 0.14], [1.00, 0.00]];
+  const PERFIL_CENTRO = [[0.00, 1.00], [0.45, 0.72], [0.78, 0.22], [1.00, 0.00]];
+  const FADE_BORDA  = 0.24;   // fracao de W (lados) e de H (topo/base)
+  const RAIO_CENTRO = 0.20;   // fracao do lado MENOR da tela
+
+  /* ─── Manchas da nebulosa ───
+     Posicao em fracao do canvas a partir do centro; `r` em fracao do lado menor.
+     Poucas, grandes e com alfa baixissimo: nebulosa real nao tem contorno. A
+     rotacao negativa alinha as tres maiores num eixo quase horizontal, que e
+     como o disco do nucleo se apresenta. */
+  const MANCHAS = [
+    { x: -0.24, y: -0.04, r: 0.58, achat: 0.42, rot: -0.22, cor: [194,  65,  12], a: 0.085 },
+    { x:  0.27, y:  0.07, r: 0.50, achat: 0.46, rot: -0.14, cor: [255,  90,  10], a: 0.060 },
+    { x:  0.02, y: -0.26, r: 0.44, achat: 0.60, rot:  0.30, cor: [160,  58,  20], a: 0.055 },
+    { x: -0.12, y:  0.29, r: 0.40, achat: 0.52, rot: -0.38, cor: [120,  48,  18], a: 0.050 },
+    { x:  0.33, y: -0.22, r: 0.30, achat: 0.70, rot:  0.18, cor: [255, 138,  31], a: 0.030 },
+  ];
+
+  /* Folga do cache da nebulosa para cada lado. Precisa ser maior que AMP_NEB,
+     senao a deriva revela a borda da imagem cacheada, que e exatamente o
+     retangulo visivel que este fundo inteiro existe para evitar. */
+  const MARGEM_NEB = 96;
+  const AMP_NEB = 34;
+
+  // Periodos longos e primos entre si (127 s, 173 s, 89 s). Periodo parecido bate
+  // em fase e o olho passa a ver pulsacao, que e o que cansa.
+  const W_NEB_X = (Math.PI * 2) / 127;
+  const W_NEB_Y = (Math.PI * 2) / 173;
+  const W_NEB_A = (Math.PI * 2) / 89;
+
+  function gerarNebulosa() {
+    const c = document.createElement("canvas");
+    c.width = W + MARGEM_NEB * 2;
+    c.height = H + MARGEM_NEB * 2;
+    const g = c.getContext("2d");
+    const ox = c.width / 2, oy = c.height / 2;
+    const base = Math.min(c.width, c.height);
+
+    // `arc` e caro em volume, mas aqui sao 5 chamadas UMA vez por resize.
+    for (const m of MANCHAS) {
+      const r = base * m.r;
+      const [cr, cg, cb] = m.cor;
+      const pico = m.a * I.nebulosa;
+      g.save();
+      g.translate(ox + c.width * m.x, oy + c.height * m.y);
+      g.rotate(m.rot);
+      g.scale(1, m.achat);
+      const grad = g.createRadialGradient(0, 0, 0, 0, 0, r);
+      grad.addColorStop(0.00, `rgba(${cr},${cg},${cb},${pico})`);
+      grad.addColorStop(0.40, `rgba(${cr},${cg},${cb},${pico * 0.52})`);
+      grad.addColorStop(0.75, `rgba(${cr},${cg},${cb},${pico * 0.14})`);
+      grad.addColorStop(1.00, `rgba(${cr},${cg},${cb},0)`);
+      g.fillStyle = grad;
+      g.beginPath();
+      g.arc(0, 0, r, 0, Math.PI * 2);
+      g.fill();
+      g.restore();
     }
-    requestAnimationFrame(draw);
-  })();
+    return c;
+  }
+
+  function gerarMascara() {
+    const c = document.createElement("canvas");
+    c.width = W; c.height = H;
+    const g = c.getContext("2d");
+
+    // Buraco central.
+    const rc = Math.min(W, H) * RAIO_CENTRO;
+    const gc = g.createRadialGradient(cx, cy, 0, cx, cy, rc);
+    for (const [p, a] of PERFIL_CENTRO) gc.addColorStop(p, `rgba(0,0,0,${a})`);
+    g.fillStyle = gc;
+    g.beginPath();
+    g.arc(cx, cy, rc, 0, Math.PI * 2);
+    g.fill();
+
+    // Quatro bordas: [x, y, larg, alt, pontoNaBeirada, pontoInterno].
+    const fw = W * FADE_BORDA, fh = H * FADE_BORDA;
+    const faixas = [
+      [0,      0,      fw, H,  0,     0,  fw,     0     ],
+      [W - fw, 0,      fw, H,  W,     0,  W - fw, 0     ],
+      [0,      0,      W,  fh, 0,     0,  0,      fh    ],
+      [0,      H - fh, W,  fh, 0,     H,  0,      H - fh],
+    ];
+    for (const [x, y, w, h, x0, y0, x1, y1] of faixas) {
+      const grad = g.createLinearGradient(x0, y0, x1, y1);
+      for (const [p, a] of PERFIL_BORDA) grad.addColorStop(p, `rgba(0,0,0,${a})`);
+      g.fillStyle = grad;
+      g.fillRect(x, y, w, h);
+    }
+    return c;
+  }
+
+  /* Reposiciona uma estrela. `inicial` espalha por area (sqrt do sorteio, senao
+     a densidade explode no centro); fora disso ela reentra por fora da tela, e
+     a entrada e invisivel porque a faixa de dissolucao apaga a beirada inteira.
+     O desaparecimento no centro tambem nao se ve: `rMin` fica onde a mascara ja
+     apaga ~86%. */
+  function recolocar(e, inicial) {
+    e.ang = Math.random() * Math.PI * 2;
+    e.r = inicial
+      ? Math.sqrt(rMin * rMin + Math.random() * (rMax * rMax - rMin * rMin))
+      : rMax * (1 + Math.random() * 0.14);
+  }
+
+  function gerarEstrelas() {
+    /* Area do disco de raio meia-diagonal, nao do retangulo: o campo e polar e
+       boa parte dele cai fora da tela a qualquer momento. Convertida para px de
+       TELA porque e nessa unidade que `densidade` esta escrita.
+       O teto de 240 e o que segura o custo no celular e no Celeron; o piso de 50
+       evita ceu vazio numa janela pequena. */
+    const areaDisco = (Math.PI * (W * W + H * H)) / 4 / (ESCALA * ESCALA);
+    const qtd = Math.max(50, Math.min(240, Math.round(areaDisco / I.densidade)));
+
+    estrelas = [];
+    let faiscas = 0;
+    for (let i = 0; i < qtd; i++) {
+      // Sorteia a camada pelo peso acumulado. O default na ultima camada cobre o
+      // caso de os pesos nao somarem exatamente 1.
+      const u = Math.random();
+      let idxCam = CAMADAS.length - 1, acc = 0;
+      for (let k = 0; k < CAMADAS.length; k++) {
+        acc += CAMADAS[k].peso;
+        if (u <= acc) { idxCam = k; break; }
+      }
+      const cam = CAMADAS[idxCam];
+      const e = {
+        cam: idxCam,
+        tom: Math.random() < 0.55 ? (Math.random() < 0.5 ? 0 : 1) : (Math.random() < 0.6 ? 2 : 3),
+        // Brilho individual dentro da camada: campo com todas as estrelas no
+        // mesmo brilho le como textura, nao como ceu.
+        base: cam.brilho * (0.45 + Math.random() * 0.55),
+        fase: Math.random() * Math.PI * 2,
+        // Cintilacao entre 11 s e 26 s por ciclo. Mais rapido que isso vira
+        // pisca-pisca e chama atencao.
+        wCint: (Math.PI * 2) / (11 + Math.random() * 15),
+        // Poucas faiscas, e so na camada da frente: sao 3 fillRect extras cada,
+        // e em volume isso deixa de ser barato.
+        faisca: idxCam === 2 && faiscas < 6 && Math.random() < 0.22,
+        r: 0, ang: 0,
+      };
+      if (e.faisca) faiscas++;
+      recolocar(e, true);
+      estrelas.push(e);
+    }
+  }
+
+  function avancar(dt) {
+    for (const e of estrelas) {
+      const cam = CAMADAS[e.cam];
+      e.ang += cam.giro * dt;
+      e.r -= cam.vr * ESCALA * dt;   // vr e em px de tela; `r` vive em px de buffer
+      if (e.r < rMin) recolocar(e, false);
+    }
+  }
+
+  function pintar(t) {
+    ctx.globalCompositeOperation = "source-over";
+    ctx.clearRect(0, 0, W, H);
+
+    // Nebulosa: um blit com translacao. Sem escala, de proposito — drawImage com
+    // escala reamostra a imagem inteira a cada quadro, e o respiro sai de graca
+    // no globalAlpha.
+    if (nebulosa) {
+      ctx.globalAlpha = 0.84 + 0.16 * Math.sin(t * W_NEB_A);
+      ctx.drawImage(
+        nebulosa,
+        -MARGEM_NEB + Math.sin(t * W_NEB_X) * AMP_NEB,
+        -MARGEM_NEB + Math.cos(t * W_NEB_Y) * AMP_NEB * 0.6);
+      ctx.globalAlpha = 1;
+    }
+
+    for (const e of estrelas) {
+      const x = cx + e.r * Math.cos(e.ang);
+      const y = cy + e.r * Math.sin(e.ang) * ACHATAMENTO;
+      // Metade do campo esta fora da tela a qualquer momento: descartar antes do
+      // fillRect vale mais que qualquer micro-otimizacao de desenho.
+      if (x < -4 || x > W + 4 || y < -4 || y > H + 4) continue;
+
+      const cint = 0.70 + 0.30 * Math.sin(t * e.wCint + e.fase);
+      let nivel = (e.base * cint * NIVEIS) | 0;
+      if (nivel < 0) nivel = 0; else if (nivel >= NIVEIS) nivel = NIVEIS - 1;
+
+      const tons = PALETA[e.tom];
+      const tam = CAMADAS[e.cam].tam;
+
+      if (e.faisca && nivel > 5) {
+        // Braços de 1 px num nivel mais fraco dao a leitura de estrela brilhante.
+        // ⚠️ Nada de shadowBlur: uma sombra por particula derruba o quadro no
+        // Celeron, e e por isso que a faisca e desenhada e nao iluminada.
+        ctx.fillStyle = tons[nivel - 4];
+        ctx.fillRect(x - 2.5, y + 0.5, 6, 1);
+        ctx.fillRect(x + 0.5, y - 2.5, 1, 6);
+      }
+
+      ctx.fillStyle = tons[nivel];
+      ctx.fillRect(x, y, tam, tam);
+    }
+
+    // Dissolucao: apaga o que foi pintado seguindo o gradiente de alfa. Tem de
+    // ser o ultimo passo, e o composite volta para source-over no inicio do
+    // quadro seguinte (clearRect com destination-out nao limpa nada).
+    if (mascara) {
+      ctx.globalCompositeOperation = "destination-out";
+      ctx.drawImage(mascara, 0, 0);
+      ctx.globalCompositeOperation = "source-over";
+    }
+  }
+
+  function medir() {
+    const nW = window.innerWidth, nH = window.innerHeight;
+    /* ⚠️ No celular a barra de endereco entra e sai e muda a altura em ~60 px a
+       cada rolagem. Regenerar o campo nesses eventos reembaralharia as estrelas
+       na cara do usuario, entao mudanca pequena de altura so reestica o canvas e
+       mantem as estrelas onde estao (as coordenadas sao polares a partir do
+       centro, logo a deformacao e imperceptivel). */
+    const refazerCampo = !estrelas.length || Math.abs(nW - vpW) > 1 || Math.abs(nH - vpH) > 140;
+    vpW = nW; vpH = nH;
+
+    // Atribuir width ja limpa o canvas, entao quem chama precisa repintar.
+    W = canvas.width  = Math.max(1, Math.round(nW * ESCALA));
+    H = canvas.height = Math.max(1, Math.round(nH * ESCALA));
+    cx = W / 2; cy = H / 2;
+    rMax = (Math.hypot(W, H) / 2) * 1.06;             // alem do canto
+    rMin = Math.min(W, H) * RAIO_CENTRO * 0.35;       // dentro do buraco da mascara
+
+    nebulosa = gerarNebulosa();
+    mascara = gerarMascara();
+    if (refazerCampo) gerarEstrelas();
+  }
+
+  medir();
+
+  /* Acessibilidade: canvas nao obedece `prefers-reduced-motion` pelo CSS, so a
+     guarda do fim do style.css nao cobre nada daqui. Com a preferencia ligada,
+     um quadro estatico — o campo continua existindo como cenario, apenas nao se
+     move. `t` fixo em 7 s para a cintilacao nao congelar todo mundo em fase. */
+  const semMovimento = window.matchMedia?.("(prefers-reduced-motion: reduce)");
+
+  let rafId = null, ultimo = 0, acumulado = 0, t = 0;
+  const INTERVALO = 1000 / I.fps;
+
+  function quadro(agora) {
+    rafId = requestAnimationFrame(quadro);
+    // ⚠️ Teto no dt: aba oculta congela o rAF, e sem o teto o primeiro quadro na
+    // volta teria minutos de dt e teleportaria o campo inteiro.
+    const dt = Math.min((agora - ultimo) / 1000, 0.25);
+    ultimo = agora;
+
+    acumulado += dt * 1000;
+    if (acumulado < INTERVALO) return;    // trava em I.fps
+    const passo = (acumulado / 1000) * I.velocidade;
+    acumulado = 0;
+
+    t += passo;
+    avancar(passo);
+    pintar(t);
+  }
+
+  function ligar() {
+    if (semMovimento?.matches) {
+      if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+      pintar(7);
+      return;
+    }
+    if (rafId !== null) return;
+    ultimo = performance.now();
+    acumulado = INTERVALO;      // pinta no primeiro quadro, sem tela vazia
+    rafId = requestAnimationFrame(quadro);
+  }
+
+  let timerResize = null;
+  window.addEventListener("resize", () => {
+    // Debounce: resize dispara em rajada (arrastar janela, girar o celular) e
+    // cada evento custa dois canvas offscreen novos.
+    clearTimeout(timerResize);
+    timerResize = setTimeout(() => { medir(); ligar(); }, 220);
+  });
+
+  // Trocar a preferencia do sistema nao recarrega a pagina.
+  semMovimento?.addEventListener?.("change", ligar);
+
+  ligar();
 }
 
 /* ═══════════════════════════════════════════════
    ADVANCED 3D HOLOGRAPHIC SPHERE
    ═══════════════════════════════════════════════ */
-function initAdvancedSphere() {
+/* ═══════════════════════════════════════════════════════════
+   NUCLEO ORBITAL — planeta/buraco negro com aneis de poeira
+   ═══════════════════════════════════════════════════════════
+   Substituiu a `initAdvancedSphere` (malha neural ciano) em 2026-10-31.
+
+   O que desenha, de tras para frente — e a ORDEM e o que cria a profundidade,
+   nao e estetica:
+
+     1. halo externo (luz espalhada)
+     2. metade de TRAS dos aneis            (z < 0)
+     3. corpo central + anel de foton
+     4. metade da FRENTE dos aneis          (z >= 0)
+     5. sombra do corpo projetada no anel
+     6. jatos polares e pulsos de voz
+
+   ⚠️ Desenhar o anel inteiro de uma vez e depois o corpo em cima faz o anel
+   parecer um adesivo colado atras do planeta: a parte que deveria passar NA
+   FRENTE desaparece. A divisao em dois passes pelo sinal de z e o unico motivo
+   de a cena ler como 3D num canvas 2D.
+
+   Reatividade (mesmo contrato da esfera antiga, para o resto do app nao mudar):
+     state.isLoading  → o disco acelera e esquenta
+     voz.falando      → pulsos radiais saem do corpo no ritmo da fala
+     voz.consumirPulso(dt) → intensidade instantanea de cada palavra dita
+
+   Movimento continuo, sem estado que acumule: tudo e funcao de `t`, entao a
+   animacao nunca "deriva" e pausar a aba nao desincroniza nada. */
+function initNucleoOrbital() {
   const canvas = document.getElementById("neural-sphere");
   if (!canvas) return;
 
-  if (!canvas.offsetWidth) { requestAnimationFrame(initAdvancedSphere); return; }
+  // Ainda sem layout: o offsetWidth e 0 e toda a matematica de escala sairia
+  // zerada. Tenta no quadro seguinte.
+  if (!canvas.offsetWidth) { requestAnimationFrame(initNucleoOrbital); return; }
 
   const ctx = canvas.getContext("2d");
 
-  // Sistema de coordenadas LOGICO e fixo: toda a matematica daqui para baixo
-  // desenha num quadrado SIZE x SIZE, e a escala real mora so no setTransform de
-  // ajustarEscala(). Antes o SIZE vinha do offsetWidth uma unica vez, entao
-  // redimensionar a janela esticava um buffer velho (imagem borrada). Recalcular
-  // R/CX/CY/orbitas/celulas a cada resize exigiria reinicializar a esfera, e isso
-  // empilharia os timers e o rAF desta funcao.
+  // Sistema de coordenadas LOGICO e fixo: tudo desenha num quadrado SIZE x SIZE
+  // e a escala real mora so no setTransform de ajustarEscala(). Herdado da
+  // esfera antiga e mantido pelo mesmo motivo: recalcular raios e orbitas a cada
+  // resize exigiria reinicializar, o que empilharia timers e rAF.
   const SIZE = 600;
   const CX = SIZE / 2, CY = SIZE / 2;
-  const R  = SIZE * 0.365;
-  const CONN = SIZE * 0.075;
+  const R  = SIZE * 0.365;          // raio de referencia da cena
+  const RC = R * 0.46;              // sombra do buraco negro (o "centro")
 
-  // Atribuir canvas.width reseta o contexto inteiro, por isso o setTransform vem
-  // logo depois. Desenho vetorial: escala sem perda de nitidez.
+  /* Raio de influencia da lente gravitacional, em px.
+     Tudo que cairia DENTRO deste circulo e empurrado para fora da sombra em vez
+     de sumir atras dela — ver defletir(). E o que produz o arco por cima e por
+     baixo do buraco, que e a assinatura visual do Gargantua. */
+  const R_LENTE = RC * 1.95;
+
+  /* ⚠️ Limite HORIZONTAL do disco, em multiplos de R.
+     Do centro ate a borda do canvas ha SIZE/2 = 300px, e R vale 219px, entao
+     sobra 1.37R. A faixa externa precisa parar ANTES disso: na primeira versao
+     ela ia a 1.74R e as duas bandas de fora eram cortadas pela borda, o que
+     fazia o disco inteiro ler como um anel unico em vez de bandas separadas.
+     Verticalmente nao ha aperto: o disco e achatado por cos(TILT). */
+  const R_MAX = 1.28;
+
+  /* Velocidade angular de referencia do disco.
+     ⚠️ Baixa de proposito (era 0.62, ~4x mais rapida). Disco rapido le como
+     "carregando", nao como corpo celeste: massa de buraco negro supermassivo
+     gira devagar do ponto de vista de quem olha de longe. Com 0.16 a faixa
+     interna leva ~35 s por volta e a externa mais de 2 min, entao o movimento
+     e percebido sem nunca chamar atencao para si. */
+  const VEL_BASE = 0.16;
+
+  // Inclinacao do plano dos aneis. 0 = visto de cima (circulo), PI/2 = de lado
+  // (linha). 1.12 rad da a elipse achatada que parece Saturno de viés.
+  const TILT = 1.12;
+  const COS_T = Math.cos(TILT), SIN_T = Math.sin(TILT);
+
+  let pxAtual = 0;
   function ajustarEscala() {
     const css = canvas.offsetWidth;
     if (!css) return;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const px  = Math.round(css * dpr);
-    if (canvas.width === px) return;
+    /* ⚠️ Compara com uma variavel, NAO com `canvas.width`: um canvas sem width
+       atribuido nasce 300x150. Quando a conta da exatamente 300 (acontece com
+       `--esfera` batendo 300px em viewport baixo, com dpr 1), a comparacao com
+       canvas.width dava igual na PRIMEIRA chamada, a funcao retornava antes do
+       setTransform e o canvas ficava com height 150: a cena de 600x600 era
+       renderizada 1:1 num buffer 300x150 esticado, mostrando so o quadrante
+       superior esquerdo, achatado. */
+    if (pxAtual === px) return;
+    pxAtual = px;
+    // Atribuir width reseta o contexto inteiro, por isso o setTransform vem
+    // logo depois.
     canvas.width = canvas.height = px;
     const k = px / SIZE;
     ctx.setTransform(k, 0, 0, k, 0, 0);
   }
   ajustarEscala();
 
-  // ResizeObserver pega tambem o que nao dispara resize de janela (sidebar
-  // abrindo, teclado do mobile). O rAF da animacao continua o mesmo.
   const obs = new ResizeObserver(ajustarEscala);
   obs.observe(canvas);
   // Trocar de monitor muda o devicePixelRatio sem mudar o tamanho em CSS.
   window.addEventListener("resize", ajustarEscala);
 
-  function proj3(phi, theta, rotY, rotZ) {
-    const x0 = R * Math.sin(phi) * Math.cos(theta);
-    const y0 = R * Math.cos(phi);
-    const z0 = R * Math.sin(phi) * Math.sin(theta);
-    const x1 = x0 * Math.cos(rotY) + z0 * Math.sin(rotY);
-    const z1 = -x0 * Math.sin(rotY) + z0 * Math.cos(rotY);
-    const x2 = x1 * Math.cos(rotZ) - y0 * Math.sin(rotZ);
-    const y2 = x1 * Math.sin(rotZ) + y0 * Math.cos(rotZ);
-    return { px: CX + x2, py: CY + y2, z: z1 };
-  }
+  /* ─── Faixas do disco ───
+     Cada faixa e uma banda de poeira com densidade e cor propria. As lacunas
+     entre elas (o salto de `de` para o `a` da seguinte) sao as divisoes tipo
+     Cassini: sem elas o disco fica um borrao uniforme e perde a leitura de
+     "poeira", que e justamente o que se quer.
 
-  const N = 280;
-  const dots = Array.from({ length: N }, (_, i) => ({
-    phi:   Math.acos(1 - 2 * (i + 0.5) / N),
-    theta: Math.PI * (1 + Math.sqrt(5)) * i,
-    sz:    0.35 + Math.random() * 0.9,
-  }));
-
-  const CELLS = Array.from({ length: 9 }, () => ({
-    phi:   Math.random() * Math.PI,
-    theta: Math.random() * Math.PI * 2,
-    dPhi:  (Math.random() - 0.5) * 0.009,
-    dTh:   (Math.random() - 0.5) * 0.013,
-    baseR: R * (0.05 + Math.random() * 0.045),
-    phase: Math.random() * Math.PI * 2,
-    spd:   0.6 + Math.random() * 0.8,
-    sides: 5 + Math.floor(Math.random() * 3),
-  }));
-
-  const ORBITS = [
-    { n: 10, r: R * 0.93, spd:  0.50, tilt:  0.62, off: 0,               col: [0, 217, 255] },
-    { n: 7,  r: R * 1.06, spd: -0.32, tilt: -0.80, off: Math.PI / 3,     col: [0, 110, 255] },
-    { n: 12, r: R * 0.80, spd:  0.22, tilt:  1.05, off: Math.PI,          col: [0, 255, 157] },
-    { n: 5,  r: R * 1.12, spd: -0.14, tilt:  0.38, off: Math.PI * 0.75,  col: [100, 200, 255] },
+     `cor` vai de quase branco (quente, perto do corpo) a laranja profundo
+     (frio, longe): e o gradiente de temperatura de um disco de acrecao. */
+  const FAIXAS = [
+    { de: 0.60, a: 0.72, dens: 230, cor: [255, 236, 200], brilho: 1.00 },
+    { de: 0.76, a: 0.88, dens: 280, cor: [255, 186,  96], brilho: 0.88 },
+    { de: 0.92, a: 1.02, dens: 210, cor: [255, 140,  40], brilho: 0.74 },
+    { de: 1.06, a: 1.16, dens: 240, cor: [226, 100,  20], brilho: 0.58 },
+    { de: 1.20, a: 1.28, dens: 150, cor: [176,  72,  16], brilho: 0.42 },
   ];
 
-  const WAVES = [0, 0.5, 1.0, 1.5].map((o, i) => ({ phase: o * Math.PI * 2, spd: 0.7 + i * 0.18 }));
-  const pbuf = new Array(N);
+  /* Poeira. Cada grao guarda o raio e o angulo INICIAL; a posicao sai de `t`.
 
-  const HOT = new Set();
-  const hotTimer = setInterval(() => {
-    if (HOT.size < 7) HOT.add(Math.floor(Math.random() * N));
-    if (HOT.size > 3 && Math.random() > 0.55) {
-      const arr = [...HOT]; HOT.delete(arr[Math.floor(Math.random() * arr.length)]);
-    }
-  }, 700);
-
-  const STRM = [];
-  const strmTimer = setInterval(() => {
-    if (STRM.length < 8) STRM.push({
-      src: Math.floor(Math.random() * N),
-      dst: Math.floor(Math.random() * N),
-      born: null,
-      dur: 0.8 + Math.random() * 1.1,
-    });
-  }, 280);
-
-  /* ── Ondulacoes neon ao redor do globo ──
-     Cada onda nasce colada na esfera e expande para fora perdendo opacidade. O
-     raio e modulado por um seno do angulo, entao ela ondula em vez de ser um
-     circulo liso. Enquanto o modelo gera resposta (state.isLoading) as ondas
-     nascem mais rapido, mais brilhantes e com amplitude maior.
-     O alcance para em R*1.26: o canvas so tem SIZE/2 do centro ate a borda, e
-     passar disso corta a onda no meio. */
-  const ONDAS = [];
-  const MAX_ONDAS = 12;
-  let proximaOnda = 0;
-  let ultimoT = 0;
-
-  function pulsarOndas(t, ativo, falando, pulso) {
-    // Falando manda no ritmo: cada palavra dita joga o pulso em 1 e ele decai.
-    // O intervalo curto faz as ondas sairem em rajada, como voz saindo da esfera.
-    const intervalo = falando ? 0.16 : ativo ? 0.42 : 1.5;
-    if (t >= proximaOnda) {
-      ONDAS.push({
-        born:  t,
-        dur:   falando ? 1.1 : ativo ? 1.5 : 2.6,
-        // A amplitude acompanha o pulso: silabas fortes deformam mais o anel.
-        amp:   falando ? 0.05 + pulso * 0.09 : ativo ? 0.055 : 0.028,
-        lobos: 5 + Math.floor(Math.random() * 4),
-        fase:  Math.random() * Math.PI * 2,
+     ⚠️ A velocidade cai com o raio (`r^-1.5`, kepleriano). Nao e preciosismo:
+     com todos os graos na mesma velocidade angular o disco gira como um disco
+     rigido, que e exatamente a aparencia de adesivo girando que se quer evitar.
+     Com a lei de Kepler as faixas internas passam as externas e o disco
+     "escorre". */
+  const POEIRA = [];
+  for (const f of FAIXAS) {
+    for (let i = 0; i < f.dens; i++) {
+      // sqrt para a densidade ficar uniforme por AREA; sem ele a poeira
+      // acumula na borda interna de cada faixa.
+      const u = Math.sqrt(Math.random());
+      const r = R * (f.de + (f.a - f.de) * u);
+      POEIRA.push({
+        r,
+        ang: Math.random() * Math.PI * 2,
+        vel: VEL_BASE * Math.pow(R * 0.8 / r, 1.5),
+        cor: f.cor,
+        brilho: f.brilho * (0.45 + Math.random() * 0.55),
+        tam: Math.random() < 0.90 ? 1 : 2,
+        // Espessura do disco: deslocamento vertical pequeno e aleatorio, senao
+        // a poeira fica num plano matematico de espessura zero.
+        h: (Math.random() - 0.5) * R * 0.045,
+        cintila: Math.random() * Math.PI * 2,
       });
-      proximaOnda = t + intervalo;
     }
-    // Teto de seguranca: aba em segundo plano congela o rAF e o relogio segue,
-    // entao na volta nasceriam varias ondas de uma vez.
-    if (ONDAS.length > MAX_ONDAS) ONDAS.splice(0, ONDAS.length - MAX_ONDAS);
   }
 
-  function desenharOndas(t, ativo, falando, pulso) {
-    ctx.save();
-    ctx.shadowColor = falando ? "rgba(0,255,157,0.8)" : "rgba(0,217,255,0.75)";
-    for (let i = ONDAS.length - 1; i >= 0; i--) {
-      const o = ONDAS[i];
-      const p = (t - o.born) / o.dur;
-      if (p >= 1) { ONDAS.splice(i, 1); continue; }
-      if (p < 0) continue;
+  /* Graos grandes: poucos, com halo proprio. Sao eles que dão a sensacao de
+     movimento a olho nu, porque o olho segue ponto brilhante e nao nuvem. */
+  const GRAOS = Array.from({ length: 34 }, () => {
+    const r = R * (0.60 + Math.random() * (R_MAX - 0.60));
+    return {
+      r,
+      ang: Math.random() * Math.PI * 2,
+      vel: VEL_BASE * Math.pow(R * 0.8 / r, 1.5),
+      tam: 1.4 + Math.random() * 1.6,
+      h: (Math.random() - 0.5) * R * 0.05,
+      fase: Math.random() * Math.PI * 2,
+    };
+  });
 
-      const rr   = R * (1 + p * 0.26);
-      const fade = (1 - p) * (1 - p) * (ativo ? 0.9 : 0.42);
-      // Verde do --success enquanto responde: mesma paleta do estado OPERACIONAL.
-      ctx.strokeStyle = ativo ? `rgba(0,255,157,${fade})` : `rgba(0,217,255,${fade})`;
-      ctx.lineWidth   = falando ? 1.6 + pulso * 1.4 : ativo ? 1.8 : 1.1;
-      ctx.shadowBlur  = falando ? 14 + pulso * 12 : ativo ? 16 : 8;
+  /* Estrelas de fundo, fora do disco. Ficam paradas (nao giram com o disco) e
+     so cintilam: dao referencia de que a camera e que esta olhando. */
+  const ESTRELAS = Array.from({ length: 70 }, () => {
+    const ang = Math.random() * Math.PI * 2;
+    const rad = R * (R_MAX + 0.06 + Math.random() * 0.30);
+    return {
+      x: CX + rad * Math.cos(ang),
+      y: CY + rad * Math.sin(ang) * 0.85,
+      tam: Math.random() < 0.8 ? 0.7 : 1.3,
+      fase: Math.random() * Math.PI * 2,
+      spd: 0.18 + Math.random() * 0.5,
+    };
+  });
 
-      ctx.beginPath();
-      const PASSOS = 96;
-      for (let s = 0; s <= PASSOS; s++) {
-        const ang = (s / PASSOS) * Math.PI * 2;
-        // O `t` no argumento faz a ondulacao viajar ao longo do anel. Sem ele a
-        // deformacao ficaria congelada e pareceria um circulo torto, nao uma onda.
-        const mod = 1 + o.amp * Math.sin(o.lobos * ang + o.fase + t * 1.6);
-        const x = CX + Math.cos(ang) * rr * mod;
-        const y = CY + Math.sin(ang) * rr * mod;
-        if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  /* Pulsos radiais: um por palavra dita. Nascem no corpo e expandem pelo plano
+     do disco, entao sao elipses e nao circulos. */
+  const PULSOS = [];
+  const MAX_PULSOS = 10;
+
+  /** Projeta um ponto do plano do disco (raio, angulo, altura) para a tela. */
+  function projetar(r, ang, h) {
+    const sx = Math.cos(ang) * r;
+    const sz = Math.sin(ang) * r;
+    return {
+      x: CX + sx,
+      y: CY + sz * COS_T - h * SIN_T,
+      z: sz * SIN_T + h * COS_T,   // > 0 = na frente do corpo
+    };
+  }
+
+  /* ─── Doppler beaming ───
+     O lado do disco que gira NA DIRECAO de quem olha chega muito mais
+     brilhante; o que se afasta, mais apagado. E o que faz o anel do Gargantua
+     (e as fotos reais de Sgr A*) ser visivelmente torto em brilho, com um lado
+     quase branco e o outro em brasa fraca.
+
+     A velocidade tangencial em `ang` aponta para `ang + PI/2`, e a componente
+     dela na direcao da camera sai proporcional a cos(ang): cos(ang)=1 e o lado
+     que se aproxima. O expoente 1.6 concentra o brilho num arco menor, em vez
+     de espalhar em meia volta inteira.
+
+     Sem isto o anel tem brilho uniforme e le como aro desenhado a mao. */
+  function brilhoDoppler(ang) {
+    return 0.30 + 0.70 * Math.pow(0.5 + 0.5 * Math.cos(ang), 1.6);
+  }
+
+  /* ─── Lente gravitacional ───
+     O buraco negro curva a luz que passa perto, entao a metade do disco que
+     esta ATRAS dele nao fica escondida: ela aparece contornando a sombra, por
+     cima e por baixo. E o unico motivo de o Gargantua do Interestelar parecer
+     ter um disco "em pe" alem do disco horizontal.
+
+     O mapeamento comprime o intervalo [0, R_LENTE] para [RC*1.02, R_LENTE]:
+     nada pode aparecer dentro da sombra (ela engole a luz), e o que estaria la
+     se acumula logo na borda — por isso o brilho fica mais denso colado no
+     corpo, que tambem e o comportamento real.
+
+     Devolve null quando o ponto nao deve ser desenhado. */
+  function defletir(p) {
+    const dx = p.x - CX, dy = p.y - CY;
+    const d = Math.hypot(dx, dy);
+    if (d >= R_LENTE) return p;          // longe demais: a luz segue reta
+
+    // Na frente do buraco nao ha o que defletir: a luz vem direto para a camera.
+    if (p.z >= 0) return d < RC ? null : p;
+
+    if (d < 0.0001) return null;         // exatamente atras do centro: engolido
+    const alvo = RC * 1.02 + (d / R_LENTE) * (R_LENTE - RC * 1.02);
+    const k = alvo / d;
+    return { x: CX + dx * k, y: CY + dy * k, z: p.z, lente: true };
+  }
+
+  let rafId = 0;
+  let ultimoT = 0;
+  let avisouErroNucleo = false;
+  let ultimoQuadroPesado = 0;
+
+  /* ─── Passe de poeira ───
+     `frente` escolhe a metade: false desenha o que passa ATRAS do corpo, true o
+     que passa na frente. Chamada duas vezes por quadro, com o corpo desenhado
+     entre as duas. */
+  function desenharPoeira(t, frente, calor) {
+    for (const d of POEIRA) {
+      const ang = d.ang + t * d.vel;
+      const bruto = projetar(d.r, ang, d.h);
+      if ((bruto.z >= 0) !== frente) continue;
+      const p = defletir(bruto);
+      if (!p) continue;
+
+      // Profundidade clareia o que vem para a frente. Cintilacao lenta para a
+      // poeira nao parecer estatica quando o disco esta devagar.
+      const prof = 0.55 + 0.45 * (p.z / (R * R_MAX));
+      const cint = 0.90 + 0.10 * Math.sin(t * 0.55 + d.cintila);
+      const a = Math.min(1, d.brilho * prof * cint * brilhoDoppler(ang) * (0.85 + calor * 0.5));
+      if (a < 0.02) continue;
+
+      const [cr, cg, cb] = d.cor;
+      ctx.fillStyle = `rgba(${cr},${cg},${cb},${a})`;
+      // fillRect e nao arc: sao ~950 graos por quadro, e arc custa caro o
+      // suficiente para derrubar o fps no celular.
+      ctx.fillRect(p.x - d.tam / 2, p.y - d.tam / 2, d.tam, d.tam);
+    }
+  }
+
+  /** Graos grandes, com rastro e halo. Mesmo esquema de dois passes. */
+  function desenharGraos(t, frente, calor) {
+    for (const g of GRAOS) {
+      const ang = g.ang + t * g.vel;
+      const bruto = projetar(g.r, ang, g.h);
+      if ((bruto.z >= 0) !== frente) continue;
+      const p = defletir(bruto);
+      if (!p) continue;
+
+      const prof = 0.5 + 0.5 * (p.z / (R * R_MAX));
+      const brilho = (0.5 + 0.5 * Math.sin(t * 0.7 + g.fase)) * prof;
+      const a = Math.min(1, (0.35 + brilho * 0.65) * brilhoDoppler(ang) * (0.8 + calor * 0.6));
+
+      // Rastro: a posicao de alguns instantes atras, no mesmo arco.
+      const pa = defletir(projetar(g.r, ang - 0.10, g.h));
+      if (pa && (pa.z >= 0) === frente) {
+        ctx.beginPath();
+        ctx.moveTo(pa.x, pa.y);
+        ctx.lineTo(p.x, p.y);
+        ctx.strokeStyle = `rgba(255,170,80,${a * 0.30})`;
+        ctx.lineWidth = g.tam * 0.55;
+        ctx.stroke();
       }
-      ctx.closePath();
+
+      const halo = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, g.tam * 3.2);
+      halo.addColorStop(0, `rgba(255,236,200,${a})`);
+      halo.addColorStop(0.4, `rgba(255,150,50,${a * 0.5})`);
+      halo.addColorStop(1, "rgba(255,110,20,0)");
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, g.tam * 3.2, 0, Math.PI * 2);
+      ctx.fillStyle = halo;
+      ctx.fill();
+    }
+  }
+
+  /* ─── Arcos de contorno das faixas ───
+     Elipses finas que marcam onde cada banda comeca e termina. Baratissimo
+     (5 strokes) e e o que faz a lacuna entre faixas ser percebida como divisao
+     e nao como falta de poeira. */
+  function desenharArcos(t, frente, calor) {
+    // `ellipse` com rotacao 0: o raio vertical e o horizontal vezes cos(TILT),
+    // que e a propria projecao usada em projetar().
+    for (const f of FAIXAS) {
+      for (const borda of [f.de, f.a]) {
+        const rx = R * borda;
+        const ry = rx * COS_T;
+        const [cr, cg, cb] = f.cor;
+        // Cada metade e partida em dois quartos para o beaming poder variar
+        // ao longo do arco: um stroke so teria brilho unico e o degrade de
+        // luminosidade do disco morreria justamente nos contornos.
+        const base = (frente ? 0.17 : 0.07) * (0.8 + calor * 0.4);
+        const inicio = frente ? 0 : Math.PI;
+        for (let q = 0; q < 2; q++) {
+          const de = inicio + q * (Math.PI / 2);
+          const ate = de + Math.PI / 2;
+          const a = base * brilhoDoppler((de + ate) / 2);
+          ctx.beginPath();
+          ctx.ellipse(CX, CY, rx, ry, 0, de, ate);
+          ctx.strokeStyle = `rgba(${cr},${cg},${cb},${a})`;
+          ctx.lineWidth = 0.8;
+          ctx.stroke();
+        }
+      }
+    }
+  }
+
+  /* ─── Corpo central ───
+     Buraco negro: interior quase preto, borda incandescente (anel de foton) e
+     um gradiente que simula luz rasante do disco batendo no limbo. */
+  function desenharCorpo(t, calor) {
+    const resp = 0.5 + 0.5 * Math.sin(t * 0.32);
+    const intens = 0.62 + 0.38 * resp + calor * 0.45;
+
+    /* ⚠️ ORDEM: brilho PRIMEIRO, sombra DEPOIS, anel de foton por ultimo.
+       Nao e preferencia — e correcao de um bug real: `createRadialGradient`
+       pinta TUDO que cai dentro do raio interno com a cor do stop 0. O brilho
+       de acrecao comeca em RC*1.08, entao ele enchia o disco inteiro do buraco
+       de laranja e a "sombra" aparecia marrom clara. Desenhar o preto depois
+       recorta o excesso sem precisar de path em anel. */
+
+    // 1. Brilho de acrecao: a poeira defletida se acumula logo fora da sombra
+    //    (ver defletir()), entao a luz tambem. Cai rapido.
+    const borda = ctx.createRadialGradient(CX, CY, RC * 1.02, CX, CY, RC * 1.70);
+    borda.addColorStop(0,   `rgba(255,180,80,${0.34 * intens})`);
+    borda.addColorStop(0.35, `rgba(255,130,34,${0.15 * intens})`);
+    borda.addColorStop(1,   "rgba(255,90,16,0)");
+    ctx.beginPath();
+    ctx.arc(CX, CY, RC * 1.70, 0, Math.PI * 2);
+    ctx.fillStyle = borda;
+    ctx.fill();
+
+    /* 2. A sombra. PRETA DE VERDADE, `#000` literal.
+       Nada de gradiente avermelhado aqui dentro: um buraco negro nao devolve
+       luz nenhuma. Qualquer brilho no interior quebra a leitura — o olho passa
+       a ver uma esfera iluminada de lado, nao um poco. O preto e mais escuro
+       que o proprio fundo da pagina (#090502), e e isso que faz engolir. */
+    /* Degrade radial, nao preto chapado: preto absoluto no miolo subindo para um
+       ambar muito escuro so na ultima fatia do raio. E a luz do disco rasando o
+       limbo, e e o que da volume — chapado, o centro le como recorte de papel
+       colado na tela.
+
+       ⚠️ Os valores sao propositalmente quase pretos (o mais claro e #1A0C04,
+       ainda mais escuro que o #FF8A1F de qualquer borda). Clarear mais do que
+       isto transforma o poco numa esfera iluminada de lado e mata a leitura de
+       buraco negro, que foi o defeito de uma versao anterior desta cena. O
+       degrade so comeca a subir em 72% do raio. */
+    const miolo = ctx.createRadialGradient(CX, CY, 0, CX, CY, RC);
+    miolo.addColorStop(0,    "#000000");
+    miolo.addColorStop(0.72, "#000000");
+    miolo.addColorStop(0.88, "#0B0502");
+    miolo.addColorStop(0.97, "#1A0C04");
+    miolo.addColorStop(1,    "#2A1206");
+    ctx.beginPath();
+    ctx.arc(CX, CY, RC, 0, Math.PI * 2);
+    ctx.fillStyle = miolo;
+    ctx.fill();
+
+    /* 3. Anel de foton: a luz que orbitou o buraco e escapou tangenciando a
+       sombra. E FINO e colado na borda, nos poucos pixels a partir de RC.
+       Gradiente estreito e nao halo largo: halo largo vira farol e esconde o
+       disco, que foi o defeito da primeira versao desta cena. */
+    /* Em vez de um anel radial unico, um gradiente LINEAR atravessado por cima
+       do anel: ele varia com o angulo e acompanha o Doppler da borda. O
+       `clip` recorta a faixa fina entre RC e RC*1.075 (evenodd = dois arcos,
+       o de dentro vira furo). */
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(CX, CY, RC * 1.085, 0, Math.PI * 2);
+    ctx.arc(CX, CY, RC * 0.995, 0, Math.PI * 2);
+    ctx.clip("evenodd");
+    /* ⚠️ Vai da DIREITA para a esquerda: em projetar(), ang=0 cai em x = CX + r,
+       e brilhoDoppler() tem maximo em cos(ang)=1. Entao o lado que se aproxima
+       (o mais brilhante) e a direita. Com o gradiente no sentido natural
+       (esquerda->direita) o anel brilhava do lado oposto ao da poeira, e os
+       dois se contradiziam na mesma cena. */
+    const foton = ctx.createLinearGradient(CX + RC, CY, CX - RC, CY);
+    foton.addColorStop(0,    `rgba(255,252,242,${0.95 * intens})`);
+    foton.addColorStop(0.30, `rgba(255,214,150,${0.72 * intens})`);
+    foton.addColorStop(0.62, `rgba(255,160,56,${0.34 * intens})`);
+    foton.addColorStop(1,    `rgba(210,96,20,${0.18 * intens})`);
+    ctx.fillStyle = foton;
+    ctx.fillRect(CX - RC * 1.1, CY - RC * 1.1, RC * 2.2, RC * 2.2);
+    ctx.restore();
+
+    /* 4. Borda do limbo, em DEGRADE ao longo do anel.
+       ⚠️ Nao use um `stroke` unico aqui: uma cor so produz um aro de brilho
+       uniforme, que e exatamente o que faz a cena parecer um circulo desenhado
+       a mao em vez de luz. O brilho tem de seguir o mesmo Doppler do disco — o
+       lado que se aproxima quase branco, o que se afasta quase apagado.
+
+       Varrido em segmentos curtos com sobreposicao (o passo e 1/N, o arco e
+       1.6/N) para o degrade sair continuo: sem a sobreposicao aparecem costuras
+       entre os segmentos. */
+    const SEG = 96;
+    for (let i = 0; i < SEG; i++) {
+      const de = (i / SEG) * Math.PI * 2;
+      const ate = ((i + 1.6) / SEG) * Math.PI * 2;
+      const meio = (de + ate) / 2;
+      const d = brilhoDoppler(meio);
+      // Cor tambem anda com o brilho: branco-quente no lado que se aproxima,
+      // ambar escuro no que se afasta. So alfa daria um aro cinza.
+      const cr = 255;
+      const cg = Math.round(150 + 100 * d);
+      const cb = Math.round(70 + 140 * d);
+      const a = (0.18 + 0.72 * d) * (0.75 + 0.25 * resp);
+      ctx.beginPath();
+      ctx.arc(CX, CY, RC, de, ate);
+      ctx.strokeStyle = `rgba(${cr},${cg},${cb},${a})`;
+      ctx.lineWidth = 0.8 + 1.1 * d;
       ctx.stroke();
     }
-    ctx.restore();
   }
 
-  const T0 = performance.now();
-  let rafId;
 
-  function draw(now) {
+
+  /* ⚠️ NAO existe sombra projetada nesta cena, e nao e esquecimento.
+     Uma versao anterior desenhava uma elipse escura "do corpo sobre o anel".
+     Esta errado por dois motivos: o disco e AUTO-LUMINOSO (ele proprio e a
+     fonte de luz, nao ha luz externa para o corpo bloquear), e a sombra
+     aparecia como uma mancha marrom sobre a silhueta. Removida em 2026-10-31.
+     Se um dia alguem quiser escurecer parte do disco, o caminho certo e o
+     Doppler beaming em `brilhoDoppler()`, que e fisico. */
+
+
+
+  /* Jatos polares: dois cones de luz saindo dos polos, perpendiculares ao
+     disco. Ficam discretos em repouso e crescem quando o modelo esta gerando —
+     é o indicador visual de "trabalhando". */
+  function desenharJatos(t, gerando, calor) {
+    const forca = (gerando ? 0.75 : 0.22) + calor * 0.35;
+    const ondula = 0.85 + 0.15 * Math.sin(t * 0.8);
+    const alt = R * (0.55 + forca * 0.5) * ondula;
+
+    for (const dir of [-1, 1]) {
+      const g = ctx.createLinearGradient(CX, CY, CX, CY + dir * alt);
+      g.addColorStop(0, `rgba(255,210,150,${0.26 * forca})`);
+      g.addColorStop(0.35, `rgba(255,140,40,${0.13 * forca})`);
+      g.addColorStop(1, "rgba(255,110,20,0)");
+      ctx.beginPath();
+      ctx.moveTo(CX - RC * 0.26, CY);
+      ctx.lineTo(CX + RC * 0.26, CY);
+      ctx.lineTo(CX + RC * 0.62, CY + dir * alt);
+      ctx.lineTo(CX - RC * 0.62, CY + dir * alt);
+      ctx.closePath();
+      ctx.fillStyle = g;
+      ctx.fill();
+    }
+  }
+
+  /** Nasce um pulso por palavra dita, e um lento e constante em repouso. */
+  let proximoPulso = 0;
+  function pulsar(t, gerando, falando, pulso) {
+    const intervalo = falando ? 0.26 : gerando ? 0.9 : 4.5;
+    if (t >= proximoPulso) {
+      proximoPulso = t + intervalo;
+      if (PULSOS.length < MAX_PULSOS) {
+        PULSOS.push({ born: t, forca: falando ? 0.5 + pulso * 0.5 : gerando ? 0.4 : 0.22 });
+      }
+    }
+  }
+
+  function desenharPulsos(t) {
+    const DUR = 5.0;
+    for (let i = PULSOS.length - 1; i >= 0; i--) {
+      const p = PULSOS[i];
+      const prog = (t - p.born) / DUR;
+      if (prog >= 1) { PULSOS.splice(i, 1); continue; }
+      // Comeca na borda do corpo e vai ate o fim do disco.
+      const rx = RC + (R * R_MAX - RC) * prog;
+      const a = (1 - prog) * 0.30 * p.forca;
+      if (a < 0.004) continue;
+      ctx.beginPath();
+      ctx.ellipse(CX, CY, rx, rx * COS_T, 0, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(255,170,70,${a})`;
+      ctx.lineWidth = 1.6 * (1 - prog);
+      ctx.stroke();
+    }
+  }
+
+  function desenharEstrelas(t) {
+    for (const e of ESTRELAS) {
+      const a = 0.18 + 0.32 * (0.5 + 0.5 * Math.sin(t * e.spd + e.fase));
+      ctx.fillStyle = `rgba(255,225,190,${a})`;
+      ctx.fillRect(e.x, e.y, e.tam, e.tam);
+    }
+  }
+
+  /* ─── Imagem secundaria (anel de Einstein) ───
+     Alem da poeira defletida grao a grao, o disco inteiro aparece uma segunda
+     vez como um anel fino contornando a sombra: e a luz que deu meia volta no
+     buraco antes de escapar. No Gargantua e essa imagem que forma o arco
+     subindo por cima e descendo por baixo da esfera preta, e sem ela a cena le
+     como "planeta com aneis" em vez de buraco negro.
+
+     Desenhada como anel circular (nao elipse): a imagem secundaria perde a
+     inclinacao do disco original, porque a luz foi curvada para fora do plano.
+     Mais intensa nos polos, onde o disco real nao cobre. */
+  function desenharAnelEinstein(t, calor) {
+    const resp = 0.5 + 0.5 * Math.sin(t * 0.32);
+    const intens = 0.55 + 0.45 * resp + calor * 0.4;
+
+    for (const [raio, largura, alfa] of [
+      [RC * 1.16, 2.6, 0.30],
+      [RC * 1.30, 1.8, 0.16],
+      [RC * 1.46, 1.2, 0.08],
+    ]) {
+      // Varre o anel em passos e modula pelo angulo: mais forte em cima e em
+      // baixo (onde |sin| e alto), porque de lado o disco real ja cobre.
+      const PASSOS = 72;
+      for (let i = 0; i < PASSOS; i++) {
+        const de = (i / PASSOS) * Math.PI * 2;
+        const ate = ((i + 1.4) / PASSOS) * Math.PI * 2;
+        const meio = (de + ate) / 2;
+        const polar = Math.pow(Math.abs(Math.sin(meio)), 1.5);
+        const a = alfa * intens * (0.18 + 0.82 * polar) * brilhoDoppler(meio);
+        if (a < 0.004) continue;
+        ctx.beginPath();
+        ctx.arc(CX, CY, raio, de, ate);
+        ctx.strokeStyle = `rgba(255,205,140,${a})`;
+        ctx.lineWidth = largura;
+        ctx.stroke();
+      }
+    }
+  }
+
+  function draw(ms) {
+    /* ⚠️ Sai cedo quando a cena esta ESCONDIDA, e isso nao e micro-otimizacao.
+       `criarBolha()` e `abrirConversa()` poem `hidden` na tela de boas-vindas,
+       que vira `display:none`. O navegador NAO throttla o rAF por isso (so a
+       troca de aba throttla), entao o quadro inteiro continuava sendo desenhado
+       para ninguem durante a conversa toda: ~1110 fillRect de poeira, 34 graos,
+       70 estrelas, 37 gradientes alocados e ~350 arcos com stroke, a 60 fps.
+       Num Celeron de 2 nucleos e no celular, isso e a conta mais cara da tela.
+
+       `offsetParent === null` cobre display:none em qualquer ancestral e custa
+       uma leitura de layout. Continua agendando o proximo quadro para a cena
+       voltar sozinha quando o usuario clicar em JARVIS ou NOVA. */
+    if (canvas.offsetParent === null) {
+      rafId = requestAnimationFrame(draw);
+      return;
+    }
+
+    /* ⚠️ Durante a geracao a cena desenha a 20 fps em vez de 60, e isso NAO e
+       economia de bateria: e o unico jeito de a animacao parar de competir com
+       a propria resposta que o usuario esta esperando.
+
+       Medido em 31/10/2026, com a aba do Jarvis aberta: o processo de GPU do
+       Chrome marcava 45% de CPU e o load do Mac batia 10,4. O llama.cpp roda a
+       inferencia no METAL, a mesma GPU que o canvas usa, entao os dois disputam
+       o mesmo recurso. A geracao caiu de 18 tok/s para 5,6 tok/s nessa briga.
+
+       Contraintuitivo de proposito: a versao anterior deixava a cena MAIS
+       intensa enquanto gerava (ondas em rajada, jatos crescendo), que e
+       exatamente quando ela tem de sair da frente. O movimento continua visivel
+       a 20 fps; o que some e um terco do custo de GPU. */
+    if (state.isLoading === true) {
+      if (ms - ultimoQuadroPesado < 50) {
+        rafId = requestAnimationFrame(draw);
+        return;
+      }
+      ultimoQuadroPesado = ms;
+    }
+
+    const t = ms / 1000;
+    /* ⚠️ save/restore no par com o try: desenharCorpo() usa `clip()`, e uma
+       excecao no meio dele deixaria o clip ATIVO para sempre. O catch mantem o
+       laco vivo, entao a cena encolheria para o recorte do anel de foton e
+       assim ficaria, com exatamente uma linha no console (avisouErroNucleo
+       garante isso). Um lancamento unico viraria degradacao permanente. */
+    ctx.save();
     try {
-      const t   = (now - T0) * 0.001;
-      const rotY = t * 0.17;
-      const rotZ = Math.sin(t * 0.09) * 0.12;
-
       ctx.clearRect(0, 0, SIZE, SIZE);
 
-      const atm = ctx.createRadialGradient(CX, CY, R * 0.6, CX, CY, R * 1.2);
-      atm.addColorStop(0, "rgba(0,80,200,0.00)");
-      atm.addColorStop(0.5, "rgba(0,80,200,0.05)");
-      atm.addColorStop(1, "rgba(0,217,255,0.00)");
-      ctx.fillStyle = atm;
-      ctx.beginPath(); ctx.arc(CX, CY, R * 1.2, 0, Math.PI * 2); ctx.fill();
-
-      // Ondas primeiro: ficam atras da malha do globo, mas como o raio delas
-      // comeca em R elas aparecem inteiras ao redor dele.
       const gerando = state.isLoading === true;
       const falando = voz.falando === true;
       // dt real entre quadros: o decaimento do pulso nao pode depender do fps.
       const pulso = voz.consumirPulso(Math.min(0.05, t - ultimoT));
       ultimoT = t;
-      pulsarOndas(t, gerando, falando, pulso);
-      desenharOndas(t, gerando || falando, falando, pulso);
 
-      ctx.save();
-      ctx.globalAlpha = 0.16 + 0.05 * Math.sin(t * 0.8);
-      ctx.strokeStyle = "rgba(0,217,255,0.9)";
-      ctx.lineWidth = 0.5;
-      for (let lat = 1; lat <= 7; lat++) {
-        const pLat = (lat / 8) * Math.PI;
-        const rr  = R * Math.sin(pLat);
-        const yy  = CY - R * Math.cos(pLat) * Math.cos(rotZ * 0.5);
-        ctx.globalAlpha = lat === 4 ? 0.32 + 0.10 * Math.sin(t * 0.8) : 0.14 + 0.05 * Math.sin(t * 0.8);
-        ctx.lineWidth = lat === 4 ? 0.8 : 0.45;
-        ctx.beginPath();
-        ctx.ellipse(CX, yy, rr * (0.88 + 0.12 * Math.abs(Math.cos(rotY))), rr * 0.27, 0, 0, Math.PI * 2);
-        ctx.stroke();
+      // "Calor" e a intensidade geral da cena. Um escalar so, consumido por
+      // todas as camadas, mantem a reacao coerente: tudo esquenta junto.
+      const calor = (gerando ? 0.5 : 0) + (falando ? 0.3 : 0) + pulso * 0.4;
+
+      pulsar(t, gerando, falando, pulso);
+
+      // 1. halo externo: luz do disco espalhada no "ar".
+      // Contido de proposito: uma versao anterior ia a R*1.53 com alfa alto e
+      // o laranja lavava a area de chat inteira, deixando a cena sem contraste.
+      const haloA = 0.035 + 0.02 * Math.sin(t * 0.22) + calor * 0.04;
+      const halo = ctx.createRadialGradient(CX, CY, RC * 0.9, CX, CY, R * (R_MAX + 0.05));
+      halo.addColorStop(0, `rgba(255,150,46,${haloA * 1.5})`);
+      halo.addColorStop(0.5, `rgba(210,84,14,${haloA * 0.7})`);
+      halo.addColorStop(1, "rgba(140,46,8,0)");
+      ctx.fillStyle = halo;
+      ctx.fillRect(0, 0, SIZE, SIZE);
+
+      desenharEstrelas(t);
+
+      // 2. metade de TRAS do disco.
+      desenharArcos(t, false, calor);
+      desenharPoeira(t, false, calor);
+      desenharGraos(t, false, calor);
+
+      // 3. corpo (tapa o que ficou atras).
+      desenharJatos(t, gerando, calor);
+      desenharCorpo(t, calor);
+
+      // 3b. imagem secundaria: sai de tras da sombra, por isso vem depois do
+      //     corpo e antes da poeira da frente.
+      desenharAnelEinstein(t, calor);
+
+      // 4. metade da FRENTE do disco, por cima do corpo.
+      desenharPoeira(t, true, calor);
+      desenharGraos(t, true, calor);
+      desenharArcos(t, true, calor);
+
+      // 5.
+      desenharPulsos(t);
+    } catch (erro) {
+      /* Um quadro que falha nao pode matar a animacao: sem o catch, qualquer
+         excecao aqui congela a tela inicial para sempre.
+
+         ⚠️ Mas o catch MUDO custou caro em 2026-10-31: um erro dentro do draw
+         deixava a cena pela metade (so o halo pintava) e nao havia nada no
+         console — o sintoma parecia bug de CSS ou de layout, e a investigacao
+         foi feita lendo pixel do canvas. Loga UMA vez: o suficiente para dizer
+         onde olhar, sem inundar o console a 60 fps. */
+      if (!avisouErroNucleo) {
+        avisouErroNucleo = true;
+        console.error("[nucleo] quadro falhou, a cena fica incompleta:", erro);
       }
-      ctx.globalAlpha = 0.13 + 0.04 * Math.sin(t * 0.8);
-      ctx.lineWidth = 0.4;
-      for (let m = 0; m < 12; m++) {
-        const mTh = (m / 12) * Math.PI * 2;
-        const seg = [];
-        for (let s = 0; s <= 24; s++) {
-          const p = proj3((s / 24) * Math.PI, mTh, rotY, rotZ);
-          if (p.z > 0) seg.push(p);
-        }
-        if (seg.length > 1) {
-          ctx.beginPath(); ctx.moveTo(seg[0].px, seg[0].py);
-          for (let k = 1; k < seg.length; k++) ctx.lineTo(seg[k].px, seg[k].py);
-          ctx.stroke();
-        }
-      }
+    } finally {
       ctx.restore();
-
-      ctx.save();
-      const eqA = 0.42 + 0.14 * Math.sin(t * 0.55);
-      ctx.strokeStyle = `rgba(0,217,255,${eqA})`;
-      ctx.lineWidth = 2;
-      ctx.shadowColor = "rgba(0,217,255,0.7)";
-      ctx.shadowBlur  = 10;
-      ctx.beginPath();
-      ctx.ellipse(CX, CY - R * 0.02 * Math.sin(rotZ), R, R * 0.20 + R * 0.04 * Math.abs(Math.cos(rotY)), rotZ * 0.35, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.restore();
-
-      ctx.save();
-      ctx.beginPath(); ctx.arc(CX, CY, R, 0, Math.PI * 2); ctx.clip();
-      const sa = (t * 0.38) % (Math.PI * 2);
-      const sweepSpan = 1.1;
-      const sweepSlices = 14;
-      for (let k = 0; k < sweepSlices; k++) {
-        const frac = k / sweepSlices;
-        const sliceStart = sa - sweepSpan + frac * sweepSpan;
-        const sliceEnd   = sliceStart + sweepSpan / sweepSlices;
-        ctx.beginPath(); ctx.moveTo(CX, CY);
-        ctx.arc(CX, CY, R * 0.97, sliceStart, sliceEnd);
-        ctx.closePath();
-        ctx.fillStyle = `rgba(0,255,160,${frac * frac * 0.065})`; ctx.fill();
-      }
-      const radarPulse = 0.28 + 0.12 * Math.sin(t * 2.2);
-      ctx.beginPath(); ctx.moveTo(CX, CY);
-      ctx.lineTo(CX + R * 0.97 * Math.cos(sa), CY + R * 0.97 * Math.sin(sa));
-      ctx.strokeStyle = `rgba(0,255,190,${radarPulse})`;
-      ctx.lineWidth = 0.9; ctx.stroke();
-      ctx.restore();
-
-      for (let i = 0; i < N; i++) {
-        const d = dots[i];
-        pbuf[i] = proj3(d.phi, d.theta + rotY * 0.42, rotY * 0.42, rotZ);
-        pbuf[i].sz = d.sz;
-        pbuf[i].idx = i;
-      }
-      pbuf.sort((a, b) => a.z - b.z);
-      const pmap = new Map();
-      for (const p of pbuf) pmap.set(p.idx, p);
-
-      ctx.lineWidth = 0.5;
-      const CONN2 = CONN * CONN;
-      for (let i = 0; i < N; i++) {
-        const a = pbuf[i];
-        if (a.z < -R * 0.2) continue;
-        for (let j = i + 1; j < Math.min(i + 36, N); j++) {
-          const b = pbuf[j];
-          if (b.z < -R * 0.2) continue;
-          const dx = a.px - b.px, dy = a.py - b.py;
-          const dd = dx * dx + dy * dy;
-          if (dd > CONN2) continue;
-          const d2    = Math.sqrt(dd);
-          const depth = ((a.z + b.z) / 2 + R) / (2 * R);
-          const alpha = (1 - d2 / CONN) * depth * 0.22;
-          ctx.beginPath(); ctx.moveTo(a.px, a.py); ctx.lineTo(b.px, b.py);
-          ctx.strokeStyle = `rgba(0,${Math.round(138 + depth * 79)},255,${alpha})`;
-          ctx.stroke();
-        }
-      }
-
-      for (let i = 0; i < N; i++) {
-        const p = pbuf[i];
-        const depth = (p.z + R) / (2 * R);
-        if (depth < 0.04) continue;
-        const pulse = 0.88 + 0.12 * Math.sin(t * 1.6 + p.sz * 7);
-        const r = depth * 1.7 * p.sz * pulse + 0.2;
-        ctx.beginPath(); ctx.arc(p.px, p.py, r, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(0,${Math.round(148 + depth * 69)},255,${0.12 + depth * 0.88})`;
-        ctx.fill();
-      }
-
-      for (const polePhi of [0.06, Math.PI - 0.06]) {
-        const pp = proj3(polePhi, 0, rotY, rotZ);
-        if (pp.z < 0) continue;
-        const depth = (pp.z + R) / (2 * R);
-        const pg = ctx.createRadialGradient(pp.px, pp.py, 0, pp.px, pp.py, R * 0.14 * depth);
-        pg.addColorStop(0,   `rgba(200,255,255,${0.70 * depth})`);
-        pg.addColorStop(0.4, `rgba(0,217,255,${0.25 * depth})`);
-        pg.addColorStop(1,   "rgba(0,100,255,0)");
-        ctx.beginPath(); ctx.arc(pp.px, pp.py, R * 0.14 * depth, 0, Math.PI * 2);
-        ctx.fillStyle = pg; ctx.fill();
-      }
-
-      for (const p of pbuf) {
-        if (!HOT.has(p.idx)) continue;
-        const depth = (p.z + R) / (2 * R);
-        if (depth < 0.12) continue;
-        const pulse = 0.5 + 0.5 * Math.sin(t * 3.8 + p.idx * 0.73);
-        const nr = (2.2 + pulse * 2.4) * depth;
-        const hg = ctx.createRadialGradient(p.px, p.py, 0, p.px, p.py, nr * 3.5);
-        hg.addColorStop(0,   `rgba(0,255,180,${0.95 * depth})`);
-        hg.addColorStop(0.4, `rgba(0,210,255,${0.5 * depth})`);
-        hg.addColorStop(1,   "rgba(0,100,255,0)");
-        ctx.beginPath(); ctx.arc(p.px, p.py, nr, 0, Math.PI * 2);
-        ctx.fillStyle = hg; ctx.fill();
-        ctx.beginPath(); ctx.arc(p.px, p.py, nr * 2.8, 0, Math.PI * 2);
-        ctx.strokeStyle = `rgba(0,255,180,${0.18 * depth * pulse})`;
-        ctx.lineWidth = 0.6; ctx.stroke();
-      }
-
-      for (const cell of CELLS) {
-        cell.phi   += cell.dPhi;
-        cell.theta += cell.dTh;
-        if (cell.phi > Math.PI || cell.phi < 0) cell.dPhi *= -1;
-        const p = proj3(cell.phi, cell.theta, rotY * 0.28, rotZ);
-        if (p.z < -R * 0.15) continue;
-        const depth = (p.z + R) / (2 * R);
-        const pulse = 1 + 0.22 * Math.sin(t * cell.spd + cell.phase);
-        const cr    = cell.baseR * depth * pulse;
-        if (cr < 1) continue;
-        ctx.save();
-        const cg = ctx.createRadialGradient(p.px, p.py, 0, p.px, p.py, cr);
-        cg.addColorStop(0,    `rgba(0,217,255,${0.13 * depth})`);
-        cg.addColorStop(0.45, `rgba(0,100,255,${0.06 * depth})`);
-        cg.addColorStop(1,    "rgba(0,0,0,0)");
-        ctx.beginPath();
-        for (let s = 0; s <= cell.sides; s++) {
-          const ang = (s / cell.sides) * Math.PI * 2;
-          const w   = 1 + 0.28 * Math.sin(ang * 3 + t * cell.spd + cell.phase);
-          const bx  = p.px + cr * w * Math.cos(ang);
-          const by  = p.py + cr * w * Math.sin(ang) * 0.65;
-          s === 0 ? ctx.moveTo(bx, by) : ctx.lineTo(bx, by);
-        }
-        ctx.closePath();
-        ctx.fillStyle = cg; ctx.fill();
-        ctx.strokeStyle = `rgba(0,217,255,${0.13 * depth})`;
-        ctx.lineWidth = 0.5; ctx.stroke();
-        ctx.restore();
-      }
-
-      for (const orb of ORBITS) {
-        const base = t * orb.spd + orb.off;
-        for (let i = 0; i < orb.n; i++) {
-          const ang = base + (i / orb.n) * Math.PI * 2;
-          const ox = orb.r * Math.cos(ang);
-          const oy = orb.r * Math.sin(orb.tilt) * Math.sin(ang);
-          const oz = orb.r * Math.cos(orb.tilt) * Math.sin(ang);
-          const prx = ox * Math.cos(rotY) + oz * Math.sin(rotY);
-          const prz = -ox * Math.sin(rotY) + oz * Math.cos(rotY);
-          const depth = (prz + R) / (2 * R);
-          if (depth < 0.02) continue;
-          const px = CX + prx, py = CY + oy;
-          const [cr, cg, cb] = orb.col;
-          const alpha = 0.28 + depth * 0.72;
-          ctx.beginPath(); ctx.arc(px, py, 1.6 * depth + 0.4, 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(${cr},${cg},${cb},${alpha})`; ctx.fill();
-          if (depth > 0.45) {
-            const tang = ang - 0.9 / orb.n * Math.PI * 2;
-            const tx = orb.r * Math.cos(tang);
-            const ty = orb.r * Math.sin(orb.tilt) * Math.sin(tang);
-            const tz = orb.r * Math.cos(orb.tilt) * Math.sin(tang);
-            const trx = tx * Math.cos(rotY) + tz * Math.sin(rotY);
-            ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(CX + trx, CY + ty);
-            ctx.strokeStyle = `rgba(${cr},${cg},${cb},${alpha * 0.25})`;
-            ctx.lineWidth = 0.8; ctx.stroke();
-          }
-        }
-      }
-
-      for (const w of WAVES) {
-        const progress = ((t * w.spd + w.phase) % (Math.PI * 2)) / (Math.PI * 2);
-        const wAlpha   = (1 - progress) * 0.15;
-        if (wAlpha < 0.005) continue;
-        ctx.beginPath(); ctx.arc(CX, CY, progress * R, 0, Math.PI * 2);
-        ctx.strokeStyle = `rgba(0,217,255,${wAlpha})`;
-        ctx.lineWidth = 1.6 * (1 - progress); ctx.stroke();
-      }
-
-      for (let i = STRM.length - 1; i >= 0; i--) {
-        const s = STRM[i];
-        if (s.born === null) s.born = t;
-        const prog = Math.min((t - s.born) / s.dur, 1);
-        if (prog >= 1) { STRM.splice(i, 1); continue; }
-        const ps = pmap.get(s.src), pd = pmap.get(s.dst);
-        if (!ps || !pd || ps.z < -R * 0.15 || pd.z < -R * 0.15) continue;
-        const x = ps.px + (pd.px - ps.px) * prog;
-        const y = ps.py + (pd.py - ps.py) * prog;
-        const depth = ((ps.z + pd.z) / 2 + R) / (2 * R);
-        const sg = ctx.createRadialGradient(x, y, 0, x, y, 5 * depth);
-        sg.addColorStop(0,   `rgba(120,255,220,${0.92 * depth})`);
-        sg.addColorStop(0.5, `rgba(0,217,255,${0.45 * depth})`);
-        sg.addColorStop(1,   "rgba(0,100,255,0)");
-        ctx.beginPath(); ctx.arc(x, y, 3.5 * depth, 0, Math.PI * 2);
-        ctx.fillStyle = sg; ctx.fill();
-        const trailProg = Math.max(0, prog - 0.18);
-        const tx2 = ps.px + (pd.px - ps.px) * trailProg;
-        const ty2 = ps.py + (pd.py - ps.py) * trailProg;
-        ctx.beginPath(); ctx.moveTo(tx2, ty2); ctx.lineTo(x, y);
-        ctx.strokeStyle = `rgba(0,255,200,${0.38 * depth * (1 - prog)})`;
-        ctx.lineWidth = 1.4; ctx.stroke();
-      }
-
-      ctx.save();
-      const limbG = ctx.createRadialGradient(CX, CY, R * 0.78, CX, CY, R * 1.04);
-      limbG.addColorStop(0,    "rgba(0,217,255,0)");
-      limbG.addColorStop(0.70, `rgba(0,180,255,${0.04 + 0.03 * Math.sin(t * 0.7)})`);
-      limbG.addColorStop(0.87, `rgba(0,217,255,${0.22 + 0.08 * Math.sin(t * 0.7)})`);
-      limbG.addColorStop(0.95, `rgba(80,235,255,${0.12 + 0.06 * Math.sin(t * 0.7)})`);
-      limbG.addColorStop(1,    "rgba(0,217,255,0)");
-      ctx.beginPath(); ctx.arc(CX, CY, R * 1.04, 0, Math.PI * 2);
-      ctx.fillStyle = limbG; ctx.fill();
-      ctx.restore();
-
-      const coreP = 0.5 + 0.5 * Math.sin(t * 1.15);
-      const cg2 = ctx.createRadialGradient(CX, CY, 0, CX, CY, R * 0.5);
-      cg2.addColorStop(0,    `rgba(0,180,255,${0.25 + 0.11 * coreP})`);
-      cg2.addColorStop(0.35, `rgba(0,100,255,${0.11 + 0.05 * coreP})`);
-      cg2.addColorStop(1,    "rgba(0,0,0,0)");
-      ctx.fillStyle = cg2; ctx.fillRect(0, 0, SIZE, SIZE);
-
-      for (const [phase, bright] of [[0, 1], [Math.PI, 0.55]]) {
-        const scanY = CY + R * 0.72 * Math.sin(t * 0.28 + phase);
-        const sg = ctx.createLinearGradient(CX - R, scanY, CX + R, scanY);
-        sg.addColorStop(0,   "rgba(0,217,255,0)");
-        sg.addColorStop(0.3, `rgba(0,217,255,${0.10 * coreP * bright})`);
-        sg.addColorStop(0.5, `rgba(0,217,255,${0.18 * coreP * bright})`);
-        sg.addColorStop(0.7, `rgba(0,217,255,${0.10 * coreP * bright})`);
-        sg.addColorStop(1,   "rgba(0,217,255,0)");
-        ctx.fillStyle = sg;
-        ctx.fillRect(CX - R, scanY - 2, R * 2, 4);
-      }
-    } catch (_) {}
+    }
     rafId = requestAnimationFrame(draw);
   }
 
   rafId = requestAnimationFrame(draw);
   return () => {
     cancelAnimationFrame(rafId);
-    clearInterval(hotTimer); clearInterval(strmTimer);
-    obs.disconnect(); window.removeEventListener("resize", ajustarEscala);
+    obs.disconnect();
+    window.removeEventListener("resize", ajustarEscala);
   };
+}
+
+
+
+/* ═══════════════════════════════════════════════════════════
+   ANEXOS VISIVEIS NA CONVERSA
+   ═══════════════════════════════════════════════════════════
+   O arquivo enviado aparece como chip acima do campo e, depois de enviar, fica
+   dentro da bolha da pergunta.
+
+   ⚠️ Antes disto o upload so mostrava um toast de 3 s: o arquivo ia para a
+   sandbox e sumia da tela. Quem voltasse na conversa depois nao tinha como
+   saber que arquivo tinha sido enviado, e o modelo citava um nome que nao
+   aparecia em lugar nenhum.
+
+   O chip some da barra quando a mensagem e enviada, nao quando o upload termina:
+   ele representa "anexado a esta mensagem", e nao "existe no servidor".
+*/
+
+const ICONE_ARQUIVO = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6.5A1.5 1.5 0 0 0 5 3.5v17A1.5 1.5 0 0 0 6.5 22h11a1.5 1.5 0 0 0 1.5-1.5V7z"/><polyline points="14 2 14 7 19 7"/></svg>';
+const ICONE_X = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="5" y1="5" x2="19" y2="19"/><line x1="19" y1="5" x2="5" y2="19"/></svg>';
+
+function formatarKB(bytes) {
+  const kb = (bytes || 0) / 1024;
+  return kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(kb))} KB`;
+}
+
+/** Monta um chip. `removivel` false é o da bolha já enviada. */
+function montarChipAnexo(anexo, removivel) {
+  const chip = document.createElement("div");
+  chip.className = "anexo-chip";
+  /* `textContent` no nome e nao innerHTML: nome de arquivo vem do disco e pode
+     conter `<`. Com innerHTML isso seria injecao de HTML na propria interface. */
+  chip.innerHTML = ICONE_ARQUIVO;
+  const elNome = document.createElement("span");
+  elNome.className = "anexo-nome";
+  elNome.textContent = anexo.nome;
+  elNome.title = anexo.nome;
+  const elTam = document.createElement("span");
+  elTam.className = "anexo-tam";
+  elTam.textContent = formatarKB(anexo.bytes);
+  chip.append(elNome, elTam);
+  if (removivel) {
+    const x = document.createElement("button");
+    x.className = "anexo-x";
+    x.type = "button";
+    x.title = "Remover anexo";
+    x.setAttribute("aria-label", `Remover ${anexo.nome}`);
+    x.innerHTML = ICONE_X;
+    x.addEventListener("click", () => {
+      state.anexos = state.anexos.filter((a) => a.nome !== anexo.nome);
+      renderAnexos();
+      /* Nao apaga o arquivo do servidor: ele ja foi gravado e pode ser util
+         depois. Remover aqui so desfaz o vinculo com ESTA mensagem. */
+    });
+    chip.appendChild(x);
+  }
+  return chip;
+}
+
+/**
+ * Habilita o envio. Com anexo pendente, mensagem vazia passa a valer: "aqui
+ * esta o arquivo" e um pedido legitimo, e o texto vira um padrao.
+ */
+function atualizarBotaoEnviar() {
+  const btn = DOM.sendButton();
+  const input = DOM.messageInput();
+  if (!btn || !input) return;
+  const temTexto = input.value.trim().length > 0;
+  btn.disabled = state.isLoading || (!temTexto && state.anexos.length === 0);
+}
+
+function renderAnexos() {
+  const barra = DOM.anexosBarra();
+  if (!barra) return;
+  barra.innerHTML = "";
+  barra.hidden = state.anexos.length === 0;
+  for (const a of state.anexos) barra.appendChild(montarChipAnexo(a, true));
+  // O botao de enviar aceita mensagem vazia quando ha anexo.
+  atualizarBotaoEnviar();
+}
+
+/* ═══════════════════════════════════════════════════════════
+   UPLOAD DE ARQUIVO
+   ═══════════════════════════════════════════════════════════
+   Manda o arquivo para a sandbox do Jarvis. A partir dai o modelo consegue ler
+   com `ler_arquivo`, e .jrxml grande volta como especificacao resumida.
+
+   Le com `File.text()` e envia como TEXTO em JSON. Nao usa FormData de
+   proposito: multipart exigiria uma dependencia nova no servidor, e tudo que a
+   sandbox aceita ja e texto.
+*/
+
+/* Teto do lado do cliente, espelhando o da sandbox. Existe para o erro aparecer
+   na hora, em vez de depois de subir 1 MB e voltar 400. */
+const TETO_UPLOAD = 1024 * 1024;
+
+/**
+ * Registra o arquivo como anexo da mensagem em edicao.
+ *
+ * ⚠️ Existe como funcao porque havia DOIS caminhos de sucesso no upload (novo e
+ * substituir) e só o primeiro criava o chip. Resultado medido em 2026-11-03:
+ * reenviar um arquivo que já estava na sandbox gravava certo e não aparecia
+ * nada na tela, e o 400 do `JA_EXISTE` no console sugeria falha de upload.
+ */
+function registrarAnexo(nome, bytes) {
+  if (!state.anexos.some((a) => a.nome === nome)) {
+    state.anexos.push({ nome, bytes: bytes || 0 });
+  }
+  renderAnexos();
+  DOM.messageInput()?.focus();
+}
+
+async function enviarArquivo(arquivo) {
+  if (!arquivo) return;
+
+  if (arquivo.size > TETO_UPLOAD) {
+    showToast(arquivo.name + " tem " + Math.round(arquivo.size / 1024) + " KB. O limite e 1 MB.", "error");
+    return;
+  }
+
+  const btn = DOM.btnAnexo();
+  btn?.classList.add("enviando");
+
+  try {
+    const conteudo = await arquivo.text();
+    const res = await fetch(API_BASE + "/api/arquivos/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ nome: arquivo.name, conteudo }),
+    });
+    const dados = await res.json().catch(() => ({}));
+
+    if (res.ok) {
+      /* O chip substitui o toast como confirmacao: ele FICA na tela ate a
+         mensagem ser enviada, enquanto o toast sumia em 3 s e deixava o usuario
+         sem saber se o arquivo tinha ido. */
+      registrarAnexo(dados.caminho, dados.bytes);
+      return;
+    }
+
+    /* JA_EXISTE e o unico erro com acao obvia. Os outros (extensao, tamanho,
+       jrxml invalido) ja vem com texto explicativo do servidor. */
+    if (dados.code === "JA_EXISTE") {
+      if (confirm("Ja existe " + arquivo.name + " no Jarvis. Substituir?")) {
+        const r2 = await fetch(API_BASE + "/api/arquivos/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ nome: arquivo.name, conteudo, sobrescrever: true }),
+        });
+        const d2 = await r2.json().catch(() => ({}));
+        if (r2.ok) registrarAnexo(d2.caminho || arquivo.name, d2.bytes ?? arquivo.size);
+        else showToast(d2.error || "Nao consegui substituir.", "error");
+      }
+      return;
+    }
+    showToast(dados.error || "Nao consegui enviar o arquivo.", "error");
+  } catch (erro) {
+    showToast("Falha ao ler o arquivo.", "error");
+  } finally {
+    btn?.classList.remove("enviando");
+  }
+}
+
+function initUpload() {
+  const btn = DOM.btnAnexo();
+  const input = DOM.fileInput();
+  const caixa = DOM.inputContainer();
+
+  btn?.addEventListener("click", () => input?.click());
+  input?.addEventListener("change", async () => {
+    await enviarArquivo(input.files?.[0]);
+    /* Zera o valor: sem isto, escolher o MESMO arquivo de novo nao dispara
+       `change`, e o segundo envio simplesmente nao acontece, sem nada na tela
+       explicando por que. */
+    input.value = "";
+  });
+
+  if (!caixa) return;
+
+  /* Arrastar e soltar. `dragover` PRECISA de preventDefault: sem ele o
+     navegador abre o arquivo e a pagina do Jarvis e substituida pelo XML. */
+  let profundidade = 0;
+  const parar = (e) => { e.preventDefault(); e.stopPropagation(); };
+
+  caixa.addEventListener("dragenter", (e) => {
+    parar(e);
+    /* Contador de profundidade: `dragleave` dispara ao passar sobre CADA filho,
+       e sem contar o realce piscaria enquanto o cursor atravessa a caixa. */
+    profundidade++;
+    caixa.classList.add("arrastando");
+  });
+  caixa.addEventListener("dragover", parar);
+  caixa.addEventListener("dragleave", (e) => {
+    parar(e);
+    if (--profundidade <= 0) { profundidade = 0; caixa.classList.remove("arrastando"); }
+  });
+  caixa.addEventListener("drop", async (e) => {
+    parar(e);
+    profundidade = 0;
+    caixa.classList.remove("arrastando");
+    const lista = [...(e.dataTransfer?.files || [])];
+    if (lista.length > 1) showToast("Envie um arquivo por vez.", "error");
+    else await enviarArquivo(lista[0]);
+  });
+
+  // Soltar FORA da caixa tambem nao pode abrir o arquivo no navegador.
+  window.addEventListener("dragover", (e) => e.preventDefault());
+  window.addEventListener("drop", (e) => e.preventDefault());
 }
 
 /* ─── Init ───────────────────────────────────── */
@@ -1992,8 +2883,9 @@ function init() {
     }
   });
 
-  initParticles();
-  initAdvancedSphere();
+  initCampoEstelar();
+  initNucleoOrbital();
+  initUpload();
   miniGlobo = criarMiniGlobo();
   voz.iniciar();
   escuta.iniciar();
@@ -2003,7 +2895,7 @@ function init() {
 
   input.addEventListener("input", () => {
     const len = input.value.length;
-    btn.disabled = state.isLoading || input.value.trim().length === 0;
+    atualizarBotaoEnviar();
     input.style.height = "auto";
     input.style.height = Math.min(input.scrollHeight, 100) + "px";
     updateCharCounter(len);

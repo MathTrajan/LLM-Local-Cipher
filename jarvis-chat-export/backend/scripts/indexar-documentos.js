@@ -21,7 +21,22 @@ const os = require("os");
 require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
 const DRY_RUN = process.argv.includes("--dry-run");
-const SAIDA = path.join(__dirname, "..", "data", "indice-rag.json");
+
+/**
+ * Padrao: data/indice-rag.json, o indice que o rag.js le.
+ *
+ * JARVIS_INDICE_SAIDA existe para o deploy do Sentinel gerar um indice SEPARADO
+ * e mais restrito (sem CLAUDE.md nem *.local.md) sem passar por cima deste.
+ * Antes de existir, a unica forma seria backup + regerar + restaurar, e um
+ * aborto no meio deixaria a maquina sem o indice completo.
+ */
+// expandirCaminho() e a mesma usada em RAG_FONTES: `~` e a convencao de caminho
+// da casa, e sem ela `~/x.json` gravaria numa pasta chamada `~` dentro de
+// backend/, com o log imprimindo um caminho que parece certo.
+const SAIDA = path.resolve(
+  expandirCaminho(process.env.JARVIS_INDICE_SAIDA || "") ||
+    path.join(__dirname, "..", "data", "indice-rag.json")
+);
 
 // Trecho grande estoura o contexto de 4096 do 3B; pequeno demais perde sentido.
 const MAX_TRECHO = 1600;
@@ -44,7 +59,18 @@ const PASTAS_IGNORADAS = new Set([
  * perfil afirmava. Instrucao de precedencia no prompt nao resolve num 3B; a nota
  * precisa nao estar no indice.
  */
-const IGNORAR = (process.env.RAG_IGNORAR || "")
+/**
+ * RAG_IGNORAR_EXTRA e ADITIVO ao RAG_IGNORAR do .env.
+ *
+ * Existe porque o dotenv nao sobrescreve variavel ja presente no ambiente: quem
+ * quisesse acrescentar um padrao teria de reler o .env e concatenar por fora, e
+ * o `deploy-jarvis.sh` fazia isso com `grep | cut`, que nao entende valor entre
+ * aspas nem comentario na mesma linha. O filtro pararia de casar em SILENCIO e a
+ * nota excluida voltaria ao indice.
+ */
+const IGNORAR = [process.env.RAG_IGNORAR, process.env.RAG_IGNORAR_EXTRA]
+  .filter(Boolean)
+  .join(":")
   .split(":")
   .map((p) => p.trim().toLowerCase())
   .filter(Boolean);

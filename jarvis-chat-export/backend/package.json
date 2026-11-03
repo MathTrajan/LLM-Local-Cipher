@@ -8,7 +8,9 @@
     "dev": "nodemon server.js",
     "modelo": "bash scripts/modelo-local.sh",
     "indexar": "node scripts/indexar-documentos.js",
-    "testar": "node scripts/testar-arquivos.js && node scripts/testar-indice.js"
+    "checar": "node scripts/checar-travessao.js",
+    "senha": "node scripts/gerar-senha.js",
+    "testar": "node scripts/testar-arquivos.js && node scripts/testar-indice.js && node scripts/checar-travessao.js --autoteste"
   },
   "dependencies": {
     "cors": "^2.8.5",

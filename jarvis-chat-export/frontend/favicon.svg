@@ -1,17 +1,42 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="5" fill="#020813"/>
-  <!-- outer ring -->
-  <circle cx="16" cy="16" r="13.5" stroke="#00D9FF" stroke-width="0.6" fill="none" opacity="0.35"/>
-  <!-- main ring -->
-  <circle cx="16" cy="16" r="11.5" stroke="#00D9FF" stroke-width="1.4" fill="none" opacity="0.85"/>
-  <!-- inner ring -->
-  <circle cx="16" cy="16" r="7.5"  stroke="#00D9FF" stroke-width="1"   fill="none" opacity="0.65"/>
-  <!-- hexagon frame -->
-  <polygon points="16,9.8 20.7,12.4 20.7,19.6 16,22.2 11.3,19.6 11.3,12.4"
-           stroke="#00D9FF" stroke-width="0.9" fill="rgba(0,217,255,0.08)"/>
-  <!-- core ring -->
-  <circle cx="16" cy="16" r="3.6"  stroke="#00D9FF" stroke-width="1"   fill="rgba(0,217,255,0.18)"/>
-  <!-- center glow -->
-  <circle cx="16" cy="16" r="1.8"  fill="#00D9FF"/>
-  <circle cx="16" cy="16" r="0.8"  fill="white" opacity="0.9"/>
+  <!--
+    Nucleo orbital: a mesma cena da tela inicial, reduzida a 32px.
+    Trocado do aro hexagonal ciano em 2026-10-31, junto do tema laranja.
+
+    ⚠️ A 16px (o tamanho real na aba do navegador) quase nada disto se resolve:
+    o que sobra e uma silhueta escura cercada de laranja. Por isso o contraste
+    entre o corpo (#070301) e o anel (#FFD9A8) e exagerado de proposito, e todo
+    stroke fica >= 0.8 — abaixo disso o navegador some com a linha na reducao.
+  -->
+  <defs>
+    <radialGradient id="halo" cx="50%" cy="50%" r="50%">
+      <stop offset="40%" stop-color="#FF7A1A" stop-opacity="0.5"/>
+      <stop offset="100%" stop-color="#FF7A1A" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="anel" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%"   stop-color="#C2410C"/>
+      <stop offset="50%"  stop-color="#FFD9A8"/>
+      <stop offset="100%" stop-color="#C2410C"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="32" height="32" rx="6" fill="#090502"/>
+  <circle cx="16" cy="16" r="15" fill="url(#halo)"/>
+
+  <!-- Aneis de poeira: elipses achatadas, mesma inclinacao da cena do canvas.
+       Estas sao as metades de TRAS (elipse inteira, depois o corpo cobre). -->
+  <ellipse cx="16" cy="16" rx="14" ry="5.6" fill="none" stroke="#B0480F" stroke-width="0.8" opacity="0.75"/>
+  <ellipse cx="16" cy="16" rx="11.4" ry="4.5" fill="none" stroke="url(#anel)" stroke-width="1.5" opacity="0.95"/>
+  <ellipse cx="16" cy="16" rx="8.8" ry="3.5" fill="none" stroke="#FFBA60" stroke-width="1" opacity="0.8"/>
+
+  <!-- Corpo central: silhueta escura dentro do anel de foton. -->
+  <circle cx="16" cy="16" r="5.4" fill="#FF9A33" opacity="0.30"/>
+  <circle cx="16" cy="16" r="4.5" fill="#FFE0B8"/>
+  <circle cx="16" cy="16" r="3.7" fill="#070301"/>
+
+  <!-- Metade da FRENTE dos aneis, por cima do corpo: e o que cria a
+       profundidade. Sem isto o corpo parece colado na frente de um adesivo,
+       que e o mesmo motivo de o canvas desenhar em dois passes. -->
+  <path d="M 4.6 16 A 11.4 4.5 0 0 0 27.4 16" fill="none" stroke="url(#anel)" stroke-width="1.5" opacity="0.95"/>
+  <path d="M 7.2 16 A 8.8 3.5 0 0 0 24.8 16" fill="none" stroke="#FFBA60" stroke-width="1" opacity="0.85"/>
 </svg>
