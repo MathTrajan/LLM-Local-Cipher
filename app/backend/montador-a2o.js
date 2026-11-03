@@ -29,6 +29,20 @@
 
 const crypto = require("crypto");
 
+/* ⚠️ O valor do marcador MUDOU no rename de 2026-11-03 (o projeto era Jarvis), e
+   arquivo gerado antes disso continua em producao com o valor antigo. Por isso
+   quem ESCREVE usa um valor e quem LE aceita os dois: com a leitura casando so
+   o novo, o palpite de contrato voltaria a escolher saida do proprio montador
+   como se fosse original, que e o bug que este marcador existe para evitar.
+   Marcador novo entra no fim da lista; nenhum sai. */
+const MARCADOR_ATUAL = "cipher-montador-a2o";
+const MARCADORES_CONHECIDOS = [MARCADOR_ATUAL, "jarvis-montador-a2o"];
+
+/** `true` quando o XML foi gerado por este montador, em qualquer versao do nome. */
+function foiGeradoAqui(xml) {
+  return MARCADORES_CONHECIDOS.some((m) => String(xml || "").includes(m));
+}
+
 /* ─── Paleta, medida na barra do CFAWeb (2026-10-16) ───
    Copiada de _ficha.py linha 16-17. Nao inventar tom novo: o #4C537B dos
    layouts antigos foi recusado ("nao ficou no azul"). */
@@ -447,7 +461,7 @@ function montar(spec = {}) {
      do teste anterior (2 campos) em vez do original (61), e o relatorio novo
      nasceu com 59 campos a menos. Arquivo gerado nao serve de contrato: o
      contrato mora no .jrxml que veio do sistema. */
-  partes.push(`  <property name="br.com.a2o.gerado.por" value="cipher-montador-a2o"/>`);
+  partes.push(`  <property name="br.com.a2o.gerado.por" value="${MARCADOR_ATUAL}"/>`);
 
   for (const p of spec.parametros || []) {
     partes.push(`  <parameter name="${esc(p.nome)}" class="${esc(p.classe || "java.lang.String")}"/>`);
@@ -518,4 +532,4 @@ function montar(spec = {}) {
   return partes.join("\n");
 }
 
-module.exports = { montar, AZUL, W, W_PAISAGEM, FMT };
+module.exports = { montar, foiGeradoAqui, MARCADOR_ATUAL, AZUL, W, W_PAISAGEM, FMT };

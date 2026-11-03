@@ -13,6 +13,7 @@ const fs = require("fs");
 const path = require("path");
 const localProvider = require("./providers/local");
 const arquivos = require("./arquivos");
+const jrxml = require("./jrxml");
 const perfil = require("./perfil");
 
 // A memória vem do navegador a cada requisição (o servidor não guarda nada).
@@ -338,8 +339,39 @@ async function devoForcarGeracao(mensagem, options) {
   if (options.docs) return false;
   if (!ferramentasPara(options).length) return false;
   if (!PEDE_GERACAO.some((re) => re.test(String(mensagem || "")))) return false;
+
   // Reusa o inventario que o prompt ja carregou; so varre o disco sem ele.
-  if (options.listagemArquivos) return temJrxmlNaSandbox(options);
+  const temJrxml = options.listagemArquivos
+    ? temJrxmlNaSandbox(options)
+    : await temJrxmlNoDisco();
+  if (!temJrxml) return false;
+
+  /* ⚠️ NAO forcar quando o original nao e listagem. Isto corrige uma
+     incoerencia que eu mesmo criei em 2026-11-03: o resumo de um relatorio
+     agregado manda "nao gere sem confirmar, pergunte ao usuario qual dos dois
+     ele quer", e o forcamento OBRIGA uma chamada de ferramenta na mesma
+     resposta. As duas regras se cancelam, e quem ganha e o forcamento: medido
+     com "inclua o campo tomador", o modelo gerou em vez de perguntar.
+     Mandar perguntar e obrigar a gerar nao podem valer juntos. Para ficha e
+     agregado o montador nao serve, entao forcar so produziria arquivo errado
+     mais rapido. */
+  try {
+    const origem = await arquivos.origemMaisRecente();
+    if (origem) {
+      const { tipo } = jrxml.classificarLayout(origem.xml);
+      if (tipo === "agregado" || tipo === "ficha") {
+        console.log(`[a2o] origem "${origem.nome}" e ${tipo}: NAO forco a ferramenta, o modelo tem de perguntar`);
+        return false;
+      }
+    }
+  } catch (_) {
+    // Sem conseguir classificar, mantem o forcamento: e o comportamento antigo.
+  }
+  return true;
+}
+
+/** Varre o disco so quando o inventario nao foi carregado no prompt. */
+async function temJrxmlNoDisco() {
   try {
     return temJrxmlNaSandbox({ listagemArquivos: await arquivos.arvoreResumida() });
   } catch (_) {

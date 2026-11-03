@@ -812,6 +812,54 @@ function criarBolha(role, time, anexos) {
   return refs;
 }
 
+/* ═══════════════════════════════════════════════════════════
+   DEVOLVER O ERRO DA FERRAMENTA AO MODELO
+   ═══════════════════════════════════════════════════════════
+   As guardas do montador recusam com motivo e com a lista do que usar, mas o
+   erro nasce em `POST /api/arquivos/executar`, que roda DEPOIS do clique e
+   fora da conversa. O modelo nunca via a recusa.
+
+   ⚠️ Medido em 2026-11-03: a guarda de contrato recusou tres colunas inventadas
+   e respondeu com os 75 nomes certos. Correto, e ainda assim um beco sem saida:
+   o usuario leu a lista na tela e teve de reescrever o pedido a mao, porque
+   ninguem levou aquele texto de volta para quem errou.
+
+   So vale para recusa que o modelo PODE consertar trocando argumento. Erro de
+   rede, acao expirada e falha interna nao entram: repetir a pergunta nao muda
+   nada e gastaria uma inferencia por nada. */
+const ERROS_QUE_O_MODELO_CONSERTA = new Set([
+  "CAMPO_INEXISTENTE", "SOBRESCREVERIA_ORIGEM", "SAIDA_IGUAL_ORIGEM",
+  "COLUNAS_DE_MENOS", "COLUNAS_DEMAIS", "SEM_COLUNAS", "SEM_CAMPOS",
+  "SEM_SAIDA", "EXTENSAO_NAO_PERMITIDA", "HERDAR_FALHOU", "FORA_DA_RAIZ",
+  "JA_EXISTE", "ARQUIVO_RESERVADO", "NAO_ENCONTRADO", "CONTEUDO_INVALIDO",
+]);
+
+/* Uma tentativa automatica por card. Sem este teto, uma recusa que o modelo
+   nao consegue satisfazer viraria laco infinito de inferencia, e cada volta
+   custa segundos no 3B e trava o llama-server, que atende uma por vez. */
+const cardsJaDevolvidos = new WeakSet();
+
+function devolverErroAoModelo(card, err) {
+  if (!ERROS_QUE_O_MODELO_CONSERTA.has(err.codigo)) return;
+  if (cardsJaDevolvidos.has(card)) return;
+  cardsJaDevolvidos.add(card);
+
+  const nota = document.createElement("p");
+  nota.className = "acao-aviso";
+  nota.textContent = "Devolvendo o motivo ao Cipher para ele corrigir e propor de novo.";
+  card.appendChild(nota);
+
+  /* O texto vai como mensagem de usuario e APARECE na conversa, de proposito.
+     Turno invisivel faria o modelo responder a algo que o usuario nao viu ser
+     perguntado, e a conversa salva ficaria sem explicacao para a proposta nova. */
+  sendMessage(
+    `A ferramenta recusou a acao e nao gravou nada. Motivo exato do sistema:\n\n` +
+    `${err.message}\n\n` +
+    `Corrija os argumentos seguindo esse motivo e proponha a acao de novo, ` +
+    `numa unica chamada de ferramenta. Nao responda em texto.`
+  );
+}
+
 /** Card de confirmacao de uma acao de arquivo. */
 function criarCardDeAcao(acao) {
   const card = document.createElement("div");
@@ -876,12 +924,17 @@ function criarCardDeAcao(acao) {
         body: JSON.stringify({ id: acao.id }),
       });
       const data = await res.json().catch(() => null);
-      if (!res.ok || !data?.ok) throw new Error(data?.error || `Falhou (${res.status})`);
+      if (!res.ok || !data?.ok) {
+        const erro = new Error(data?.error || `Falhou (${res.status})`);
+        erro.codigo = data?.code || null;
+        throw erro;
+      }
       encerrar(descreverResultado(data), "ok");
       mostrarSaidaDaAcao(card, data);
     } catch (err) {
       encerrar(err.message, "erro");
       showToast(err.message, "error");
+      devolverErroAoModelo(card, err);
     }
   });
 
@@ -969,7 +1022,15 @@ function mostrarSaidaDaAcao(card, data) {
      2026-11-03 com o usuário pedindo "gere o arquivo" e o card respondendo
      "Feito." sem nada para clicar. Não volte a amarrar o botão à saída de
      texto: são coisas independentes. */
-  if (r.caminho && /\.(jrxml|xml|md|txt|csv|json|py|sql)$/i.test(r.caminho)) {
+  /* ⚠️ So em acao que PRODUZ arquivo. Em `ler_arquivo` o botao aparecia e
+     oferecia o arquivo que o proprio usuario tinha acabado de enviar: ele leu
+     "Baixar relconhecimento_7.jrxml" embaixo do resumo como se a geracao
+     tivesse acontecido, e o que baixaria era o original intacto. Medido em
+     2026-11-03. Oferecer download do que ele ja tem nao ajuda e confunde o
+     unico momento em que o botao significa algo. */
+  const PRODUZ_ARQUIVO = ["criar_arquivo", "editar_arquivo", "gerar_relatorio_a2o"];
+  if (PRODUZ_ARQUIVO.includes(data.ferramenta) &&
+      r.caminho && /\.(jrxml|xml|md|txt|csv|json|py|sql)$/i.test(r.caminho)) {
     const baixar = document.createElement("a");
     baixar.className = "acao-btn confirmar acao-baixar";
     baixar.href = `${API_BASE}/api/arquivos/baixar?caminho=${encodeURIComponent(r.caminho)}`;
@@ -1023,10 +1084,20 @@ async function lerSse(body, onEvento) {
 }
 
 /* ─── Send ───────────────────────────────────── */
-async function sendMessage() {
+/**
+ * Envia a mensagem do input, ou `textoForcado` quando o proprio sistema precisa
+ * falar com o modelo (ver devolverErroAoModelo).
+ */
+async function sendMessage(textoForcado = null) {
+  // Segunda trava do mesmo risco: so string vale como texto forcado, para um
+  // listener ligado direto nao transformar o Event em pergunta.
+  if (textoForcado != null && typeof textoForcado !== "string") textoForcado = null;
+
   const input = DOM.messageInput();
-  let msg     = input?.value.trim();
-  const anexos = [...state.anexos];
+  let msg     = textoForcado ?? input?.value.trim();
+  // Mensagem do sistema nao carrega anexo: o que havia ja foi consumido no turno
+  // que gerou a proposta recusada.
+  const anexos = textoForcado ? [] : [...state.anexos];
   if ((!msg && !anexos.length) || state.isLoading) return;
 
   /* ⚠️ Os nomes dos anexos entram NO TEXTO da mensagem, e nao so no objeto da
@@ -1069,8 +1140,13 @@ async function sendMessage() {
   salvarConversas();
   renderListaConversas();
 
-  input.value = ""; input.style.height = "auto";
-  updateCharCounter(0); setLoading(true);
+  /* Mensagem do sistema NAO limpa o input: se o usuario estava digitando quando
+     a recusa voltou, apagar o rascunho dele seria perda sem aviso. */
+  if (!textoForcado) {
+    input.value = ""; input.style.height = "auto";
+    updateCharCounter(0);
+  }
+  setLoading(true);
 
   // Streaming: a bolha do assistente nasce vazia no primeiro token e cresce a
   // cada delta. Com o modelo local (1 a 6 s por resposta) e a diferenca entre
@@ -2933,7 +3009,10 @@ function init() {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (!btn.disabled) sendMessage(); }
   });
 
-  btn.addEventListener("click", sendMessage);
+  /* ⚠️ `() => sendMessage()` e NAO `sendMessage`: a funcao passou a aceitar um
+     texto no primeiro argumento, e listener entrega o Event ali. Ligada direto,
+     o clique mandaria "[object PointerEvent]" como pergunta ao modelo. */
+  btn.addEventListener("click", () => sendMessage());
 
   // Botão do header: sai da conversa e volta à tela inicial. Não apaga nada —
   // antes ele limpava o histórico e recarregava a página.

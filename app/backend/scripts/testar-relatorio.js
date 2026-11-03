@@ -306,6 +306,31 @@ const PEDIDOS_QUE_NAO_DEVEM_FORCAR = [
       docs: true, listagemArquivos: ARVORE_COM_JRXML,
     })) === false);
 
+  {
+    /* ⚠️ Incoerencia medida em 2026-11-03: o resumo de um agregado manda
+       "nao gere sem confirmar, pergunte", e o forcamento obriga uma chamada de
+       ferramenta na mesma resposta. As duas regras se cancelam e o forcamento
+       ganha, entao o modelo gerou em vez de perguntar. Mandar perguntar e
+       obrigar a gerar nao podem valer juntos. */
+    const fs = require("fs");
+    const RAIZ = process.env.CIPHER_ARQUIVOS_RAIZ;
+    const alvo = path.join(RAIZ, "origem-tipada.jrxml");
+
+    fs.writeFileSync(alvo, AGREGADO);
+    checar("origem AGREGADA nao forca a ferramenta: o modelo tem de perguntar",
+      (await agent.devoForcarGeracao("inclua o campo tomador", {})) === false);
+
+    fs.writeFileSync(alvo, FICHA);
+    checar("origem FICHA tambem nao forca",
+      (await agent.devoForcarGeracao("inclua o campo tomador", {})) === false);
+
+    fs.writeFileSync(alvo, LISTAGEM);
+    checar("origem LISTAGEM continua forcando",
+      (await agent.devoForcarGeracao("inclua o campo tomador", {})) === true);
+
+    fs.unlinkSync(alvo);
+  }
+
   // ─── manual ───
   console.log("\nCarregamento do manual");
 

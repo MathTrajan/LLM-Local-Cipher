@@ -561,6 +561,35 @@ async function contratoDe(caminho) {
   return { parametros: unico(parametros), campos: unico(campos) };
 }
 
+/**
+ * O `.jrxml` mais recente da raiz que NAO foi gerado por este montador, ou
+ * `null`. Devolve `{nome, mtime, xml}`.
+ *
+ * ⚠️ Existe como helper porque agora tem DOIS consumidores: o palpite de
+ * contrato aqui e a decisao de forcar a ferramenta, no agent. Com a varredura
+ * duplicada, a regra "arquivo gerado nao serve de origem" valeria num lugar e
+ * nao no outro, e esse e exatamente o tipo de divergencia que custou a sessao
+ * de 2026-11-03.
+ *
+ * Saida do proprio montador e pulada: usa-la como contrato propaga um contrato
+ * ja reduzido. Ver montadorA2O.foiGeradoAqui, que aceita o marcador antigo.
+ */
+async function origemMaisRecente({ ignorar = "" } = {}) {
+  const entradas = await fsp.readdir(RAIZ, { withFileTypes: true });
+  const candidatos = [];
+  for (const e of entradas) {
+    if (!e.isFile() || !e.name.toLowerCase().endsWith(".jrxml")) continue;
+    if (ignorar && e.name === ignorar) continue;
+    const caminho = path.join(RAIZ, e.name);
+    const st = await fsp.stat(caminho);
+    const xml = await fsp.readFile(caminho, "utf8");
+    if (montadorA2O.foiGeradoAqui(xml.slice(0, 4000))) continue;
+    candidatos.push({ nome: e.name, mtime: st.mtimeMs, xml });
+  }
+  candidatos.sort((a, b) => b.mtime - a.mtime);
+  return candidatos[0] || null;
+}
+
 async function gerarRelatorioA2O(spec = {}) {
   garantirRaiz();
 
@@ -680,27 +709,12 @@ async function gerarRelatorioA2O(spec = {}) {
   let herdouPorPalpite = null;
   if (!(spec.campos || []).length && !spec.herdarDe) {
     try {
-      const saidaNome = path.basename(String(spec.saida || ""));
-      const entradas = await fsp.readdir(RAIZ, { withFileTypes: true });
-      const candidatos = [];
-      for (const e of entradas) {
-        if (!e.isFile() || !e.name.toLowerCase().endsWith(".jrxml")) continue;
-        if (e.name === saidaNome) continue;
-        const caminho = path.join(RAIZ, e.name);
-        const st = await fsp.stat(caminho);
-        /* Pula o que o proprio montador gerou: nao e fonte de contrato, e usar
-           como tal propaga um contrato ja reduzido. O marcador e inserido pelo
-           montador-a2o.js. */
-        const cabeca = (await fsp.readFile(caminho, "utf8")).slice(0, 4000);
-        if (cabeca.includes("cipher-montador-a2o")) continue;
-        candidatos.push({ nome: e.name, mtime: st.mtimeMs });
-      }
-      candidatos.sort((a, b) => b.mtime - a.mtime);
-      if (candidatos.length) {
-        const herdado = await contratoDe(candidatos[0].nome);
+      const origem = await origemMaisRecente({ ignorar: path.basename(String(spec.saida || "")) });
+      if (origem) {
+        const herdado = await contratoDe(origem.nome);
         if (herdado.campos.length) {
           spec = { ...spec, parametros: herdado.parametros, campos: herdado.campos };
-          herdouPorPalpite = candidatos[0].nome;
+          herdouPorPalpite = origem.nome;
         }
       }
     } catch (_) {
@@ -777,7 +791,7 @@ async function gerarRelatorioA2O(spec = {}) {
      qualquer outro e material do usuario. */
   try {
     const existente = (await fsp.readFile(alvo, "utf8")).slice(0, 4000);
-    if (!existente.includes("cipher-montador-a2o")) {
+    if (!montadorA2O.foiGeradoAqui(existente)) {
       const base = path.basename(saida).replace(/\.jrxml$/i, "");
       throw new ErroArquivo(
         `"${relativo(alvo)}" ja existe e NAO foi gerado pelo montador: e o arquivo ` +
@@ -1156,6 +1170,7 @@ module.exports = {
   resumirAcao,
   ehDestrutiva,
   escreveNoDisco,
+  origemMaisRecente,
   ErroArquivo,
   EXTENSOES,
 };
