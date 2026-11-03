@@ -19,3 +19,10 @@ aqui — recriar à mão seria inventar horário.
 ---
 
 <!-- AUTO:INSERIR-APOS — publicacoes bem-sucedidas sao gravadas logo abaixo desta linha; nao remova este marcador -->
+
+### 2026-11-03 15:21 — Servidor Sentinel (Cipher v2.2.0)
+- Publicado pelo deploy-cipher.sh.
+- Commits recentes:
+  - `0736b08` fix(contexto): o prompt estourava o contexto e a mensagem culpava o modelo
+  - `50e900c` docs(readme): os dois READMEs descreviam software que nao existe mais
+  - `087f3a9` fix(relatorio): laco de leitura precisa rodar quando a escrita vem no mesmo turno
