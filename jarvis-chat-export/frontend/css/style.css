@@ -353,10 +353,11 @@ body {
 }
 @keyframes surgir { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
-/* O nucleo encolheu de ~760px para 150px em 31/10/2026, e voltou 30% em
-   03/11 (150 -> 195, e 116 -> 151 no celular). Continua sendo assinatura e nao
-   cenario: a tela inicial PERGUNTA, e a pergunta e que tem de ser lida
-   primeiro. 195px ainda cabe acima do titulo sem empurrar o input.
+/* O nucleo encolheu de ~760px para 150px em 31/10/2026 e voltou em 03/11, em
+   dois passos na mesma sessao: +30% (195px) e depois +50% em cima disso
+   (293px; no celular 116 -> 151 -> 227). Continua sendo assinatura e nao
+   cenario, mas a margem acabou: 293px ainda cabe acima do titulo, e o proximo
+   aumento comeca a empurrar o input na primeira dobra.
 
    ⚠️ Mexer SO nesta variavel escala a cena inteira. Os raios, as faixas do
    disco, a poeira e a lente moram num sistema logico de 600x600 dentro do
@@ -364,11 +365,12 @@ body {
    `setTransform`. Nao ha numero de raio em px para acompanhar aqui.
 
    O custo e quadratico, nao linear: o buffer do canvas e `lado x dpr` ao
-   quadrado, entao +30% de lado e +69% de pixel pintado por quadro. Isso disputa
-   GPU com a inferencia APENAS quando o Jarvis esta aberto no proprio Mac; no
-   celular quem paga e o celular e o modelo nem sabe. */
+   quadrado, entao de 150 para 293 sao 3,8x mais pixel pintado por quadro, nao
+   2x. Isso disputa GPU com a inferencia APENAS quando o Jarvis esta aberto no
+   proprio Mac; no celular quem paga e o celular e o modelo nem sabe.
+   Se a tela inicial engasgar, o numero a baixar e este, nao a cena. */
 .sphere-wrap {
-  --esfera: 195px;
+  --esfera: 293px;
   position: relative; width: var(--esfera); height: var(--esfera); flex-shrink: 0;
 }
 #neural-sphere { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; }
@@ -630,7 +632,10 @@ body {
 }
 
 @media (max-width: 560px) {
-  .sphere-wrap { --esfera: 151px; }   /* mesmos 30% do valor de desktop */
+  /* 227px num celular de 390px de largura e 58% da tela. Fica proporcional ao
+     desktop, mas aqui e o limite: mais que isso e o titulo sai da primeira
+     dobra. */
+  .sphere-wrap { --esfera: 227px; }
   .welcome-titulo { font-size: 23px; }
   .message-wrapper.assistant .message-content { font-size: 16px; }
   /* Com ~178px de textarea o contador rouba espaco do placeholder. Com o campo
