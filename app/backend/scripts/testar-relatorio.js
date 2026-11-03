@@ -484,6 +484,34 @@ const PEDIDOS_QUE_NAO_DEVEM_FORCAR = [
   }
 
   {
+    /* ⚠️ Sem descartar o manual o pedido ESTOURA o contexto: medido em
+       2026-11-03, 9.315 tokens contra os 8.192 do modelo, e a conversa morria
+       dizendo que o modelo estava fora do ar. */
+    const MANUAL = "M".repeat(7900);
+    const sistema = {
+      role: "system",
+      content: "prompt base\n\n=== COMO GERAR RELATORIO A2O (siga a risca) ===\n"
+        + MANUAL + "\n=== fim do manual ===",
+    };
+    const msgs = [sistema, { role: "user", content: "gere" }];
+    const tamanhos = [];
+    const chamar = async (m) => {
+      tamanhos.push(m[0].content.length);
+      return tamanhos.length === 1
+        ? { text: "", toolCalls: [{ id: "1", nome: "ler_arquivo", argumentos: { caminho: "x.jrxml" } }] }
+        : { text: "", toolCalls: [{ id: "2", nome: "gerar_relatorio_a2o", argumentos: {} }] };
+    };
+    await agent.resolverConversa(chamar, msgs, { forcar: false });
+    checar("o manual sai do prompt depois da leitura",
+      tamanhos.length === 2 && tamanhos[1] < tamanhos[0] - 7000,
+      `tamanhos do system prompt: ${tamanhos.join(" -> ")}`);
+    checar("o resto do prompt base continua la",
+      sistema.content.startsWith("prompt base"), sistema.content.slice(0, 40));
+    checar("nao sobra marcador orfao do manual",
+      !/COMO GERAR RELATORIO A2O|fim do manual/.test(sistema.content));
+  }
+
+  {
     /* ⚠️ O caso mais comum do fluxo real, e o que mais custou: o modelo propoe
        LEITURA e ESCRITA no mesmo turno. A condicao era `every` (so leitura),
        entao o laco nao rodava, ele nunca via a especificacao e a escrita saia

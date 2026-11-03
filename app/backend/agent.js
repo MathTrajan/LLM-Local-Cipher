@@ -611,7 +611,8 @@ async function resolverConversa(chamar, messages, { forcar = false, rotulo = "",
 function montarMensagens(userMessage, conversationHistory = [], options = {}) {
   const systemPrompt = getCipherSystemPrompt(options.memory, options.trechos, options.listagemArquivos, options);
   if (options.manualRelatorio && systemPrompt?.content) {
-    systemPrompt.content += `\n\n=== COMO GERAR RELATORIO A2O (siga a risca) ===\n${options.manualRelatorio}\n=== fim do manual ===`;
+    // Os marcadores vem de constante porque `descartarManual` recorta por eles.
+    systemPrompt.content += `${MANUAL_INICIO}\n${options.manualRelatorio}\n${MANUAL_FIM}`;
   }
   const filteredHistory = conversationHistory.filter((m) => m.role !== "system");
   return [systemPrompt, ...filteredHistory, { role: "user", content: userMessage }];
