@@ -629,6 +629,69 @@ const PEDIDOS_QUE_NAO_DEVEM_FORCAR = [
       `${bom.codigo}: ${bom.mensagem || ""}`);
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // 7. Conformidade com o padrao visual A2O
+  // ─────────────────────────────────────────────────────────────
+  console.log("\nPadrao visual (as tres listas do _conferir_padrao.py)");
+
+  /* ⚠️ Estes casos existem porque o montador nasceu com as espessuras erradas
+     (0.25 e 1.0 contra 0.5/0.75/1.25) e passou TRES DIAS gerando arquivo que o
+     conferidor da A2O reprova. As sete checagens que o validador ja tinha eram
+     todas sobre defeito que QUEBRA o arquivo; nenhuma olhava conformidade com o
+     padrao visual, que e exatamente o que o usuario pede.
+     Prova de verdade e a saida do montador passando, nao a constante conferida
+     contra ela mesma. */
+  {
+    const montador = require("../montador-a2o");
+
+    const variacoes = [
+      ["listagem simples", { colunas: COLUNAS_OK }],
+      ["com KPI", { colunas: COLUNAS_OK, kpis: [{ rotulo: "Total", campo: "campo4", calculo: "Count" }] }],
+      ["com grupo e total", { colunas: COLUNAS_OK, agruparPor: "campo0", totais: [{ coluna: "campo2", calculo: "Sum" }] }],
+      ["paisagem, 10 colunas", {
+        paisagem: true,
+        colunas: Array.from({ length: 10 }, (_, i) => ({ titulo: `C${i}`, campo: `campo${i}` })),
+      }],
+    ];
+
+    for (const [rotulo, extra] of variacoes) {
+      const xml = montador.montar({
+        nome: "prova", titulo: "LISTAGEM", subtitulo: "Prova",
+        campos: CONTRATO, saida: "prova.jrxml", ...extra,
+      });
+      const fontes = [...new Set([...xml.matchAll(/<font[^>]*\bsize="([0-9.]+)"/g)].map((m) => Number(m[1])))];
+      const linhas = [...new Set([...xml.matchAll(/lineWidth="([0-9.]+)"/g)].map((m) => Number(m[1])))];
+      const cores = [...new Set([...xml.matchAll(/(?:forecolor|backcolor|lineColor)="(#[0-9A-Fa-f]{6})"/g)]
+        .map((m) => m[1].toUpperCase()))];
+
+      checar(`${rotulo}: fonte toda na ESCALA`,
+        fontes.every((f) => montador.ESCALA.includes(f)),
+        `fora: ${fontes.filter((f) => !montador.ESCALA.includes(f)).join(", ")}`);
+      checar(`${rotulo}: espessura toda em ESPESSURAS`,
+        linhas.every((l) => montador.ESPESSURAS.includes(l)),
+        `fora: ${linhas.filter((l) => !montador.ESPESSURAS.includes(l)).join(", ")}`);
+      checar(`${rotulo}: cor toda na PALETA`,
+        cores.every((c) => montador.PALETA.map((p) => p.toUpperCase()).includes(c)),
+        `fora: ${cores.filter((c) => !montador.PALETA.map((p) => p.toUpperCase()).includes(c)).join(", ")}`);
+
+      let aprovou = true, motivo = "";
+      try { jrxml.validar(xml, { padraoA2O: true }); } catch (e) { aprovou = false; motivo = e.message; }
+      checar(`${rotulo}: passa no validador de padrao`, aprovou, motivo.slice(0, 200));
+    }
+
+    // O valor exato importa: o conferidor compara numero, nao faixa.
+    checar("ESPESSURAS e exatamente a lista do _ficha.py",
+      montador.ESPESSURAS.join(",") === "0,0.5,0.75,1.25", montador.ESPESSURAS.join(","));
+
+    // E o validador tem de REPROVAR espessura fora da lista, senao nao protege.
+    const comEspessuraErrada = montador.montar({
+      nome: "prova", titulo: "X", campos: CONTRATO, colunas: COLUNAS_OK, saida: "p.jrxml",
+    }).replace('lineWidth="0.5"', 'lineWidth="0.25"');
+    let reprovou = false;
+    try { jrxml.validar(comEspessuraErrada, { padraoA2O: true }); } catch (_) { reprovou = true; }
+    checar("validador REPROVA espessura fora da lista", reprovou);
+  }
+
   console.log(`\nRESULTADO: ${ok} ok, ${falhas} falha(s)`);
   process.exit(falhas ? 1 : 0);
 })();

@@ -64,9 +64,28 @@ const F_SUBTITULO = 10;
 const F_DESTAQUE = 12;
 const F_DOCUMENTO = 15;
 
-const L_FINO = 0.25;
-const L_MEDIO = 0.5;
-const L_FORTE = 1.0;
+/* ⚠️ Estes tres valores estavam ERRADOS desde que o montador nasceu (0.25, 0.5 e
+   1.0) e ninguem notou por tres dias, porque nada aqui conferia espessura.
+   Medido em 2026-11-03 rodando o `_conferir_padrao.py` da empresa no arquivo
+   que o montador gera:
+
+     REPROVADO  prova-padrao.jrxml
+       - espessura de linha fora do padrao: 0.25, 1 (permitido: 0.0, 0.5, 0.75, 1.25)
+
+   Ou seja: TODO .jrxml gerado ate aqui seria recusado pelo conferidor da A2O.
+   Fonte e cor passavam; so a espessura estava fora. Os valores certos sao os do
+   `_ficha.py`, que e a fonte do padrao. Nao "arredondar" de novo: o conferidor
+   compara valor exato, e a lista nao tem nada entre eles. */
+const L_FINO = 0.5;
+const L_MEDIO = 0.75;
+const L_FORTE = 1.25;
+
+/* As tres listas que o `_conferir_padrao.py` cobra, copiadas do `_ficha.py`.
+   Ficam aqui porque o montador e quem gera, e o jrxml.js as usa para reprovar a
+   propria saida antes de gravar. */
+const ESCALA = [F_ROTULO, F_NOTA, F_TEXTO, F_VALOR, F_SUBTITULO, F_DESTAQUE, F_DOCUMENTO, 19];
+const ESPESSURAS = [0, L_FINO, L_MEDIO, L_FORTE];
+const PALETA = [AZUL, AZUL_CLARO, ZEBRA, FUNDO, ROTULO, BORDA, SEP, TEXTO, "#B3261E", "#FFFFFF"];
 
 const W = 555;              // A4 retrato com margens de 20
 const W_PAISAGEM = 802;
@@ -532,4 +551,10 @@ function montar(spec = {}) {
   return partes.join("\n");
 }
 
-module.exports = { montar, foiGeradoAqui, MARCADOR_ATUAL, AZUL, W, W_PAISAGEM, FMT };
+module.exports = {
+  montar, foiGeradoAqui, MARCADOR_ATUAL,
+  AZUL, W, W_PAISAGEM, FMT,
+  // Usadas pelo jrxml.js para reprovar a saida do montador com o mesmo critario
+  // do `_conferir_padrao.py` da empresa.
+  ESCALA, ESPESSURAS, PALETA,
+};

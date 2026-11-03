@@ -22,6 +22,10 @@
  * ============================================================
  */
 
+/* As listas do padrao visual moram no montador, que e quem gera. Sem ciclo de
+   require: montador-a2o.js nao importa este arquivo. */
+const montadorA2O = require("./montador-a2o");
+
 /** Tags que se fecham sozinhas no padrao JasperReports (`<tag .../>`). */
 const AUTO_FECHAVEIS = /\/>\s*$/;
 
@@ -193,6 +197,37 @@ function conferirPadraoA2O(xml) {
   if (/#4C537B/i.test(xml)) {
     problemas.push(`cor #4C537B foi recusada ("nao ficou no azul"). O azul A2O e #415F83.`);
   }
+
+  /* 8, 9 e 10: as tres checagens MECANICAS do `_conferir_padrao.py` da empresa.
+     ⚠️ Faltavam aqui, e a consequencia foi medida em 2026-11-03: o montador
+     nasceu com as espessuras erradas (0.25 e 1.0 contra 0.5/0.75/1.25) e passou
+     TRES DIAS gerando arquivo que o conferidor da A2O reprova. As sete
+     checagens acima sao todas sobre defeito que QUEBRA o arquivo; nenhuma
+     olhava conformidade com o padrao visual, que e justamente o que o usuario
+     pede ("no padrao a2o com cores, fontes").
+     Mesmo criterio do conferidor: valor exato, lista fechada, sem arredondar. */
+  const foraDaLista = (rotulo, achados, permitidos, comparar = Number) => {
+    const ruins = [...new Set(achados.filter((a) => !permitidos.includes(comparar(a))))];
+    if (ruins.length) {
+      problemas.push(
+        `${rotulo} fora do padrao A2O: ${ruins.sort().join(", ")} ` +
+          `(permitido: ${permitidos.join(", ")})`
+      );
+    }
+  };
+
+  foraDaLista("tamanho de fonte",
+    [...xml.matchAll(/<font[^>]*\bsize="([0-9.]+)"/g)].map((m) => m[1]),
+    montadorA2O.ESCALA);
+
+  foraDaLista("espessura de linha",
+    [...xml.matchAll(/lineWidth="([0-9.]+)"/g)].map((m) => m[1]),
+    montadorA2O.ESPESSURAS);
+
+  foraDaLista("cor",
+    [...xml.matchAll(/(?:forecolor|backcolor|lineColor)="(#[0-9A-Fa-f]{6})"/g)].map((m) => m[1].toUpperCase()),
+    montadorA2O.PALETA.map((c) => c.toUpperCase()),
+    String);
 
   return problemas;
 }
