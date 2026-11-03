@@ -1,13 +1,13 @@
 <div align="center">
 
-# 🤖 Cipher — Assistente Virtual Inteligente
+# 🤖 Cipher
 
-Interface de chat com LLM: pergunte qualquer coisa e receba resposta direta, em português.
+**Chat com LLM 100% offline.** O modelo roda na sua máquina. Nenhum dado sai dela.
 
-![Node.js](https://img.shields.io/badge/Node.js-339933?style=flat-square&logo=node.js&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js_20-339933?style=flat-square&logo=node.js&logoColor=white)
 ![Express](https://img.shields.io/badge/Express-000000?style=flat-square&logo=express&logoColor=white)
-![Groq](https://img.shields.io/badge/Groq_LLM-F55036?style=flat-square)
-![Vercel](https://img.shields.io/badge/Deploy-Vercel-000000?style=flat-square&logo=vercel&logoColor=white)
+![llama.cpp](https://img.shields.io/badge/llama.cpp-local-7c3aed?style=flat-square)
+![Sem banco](https://img.shields.io/badge/banco_de_dados-nenhum-64748b?style=flat-square)
 
 </div>
 
@@ -15,86 +15,115 @@ Interface de chat com LLM: pergunte qualquer coisa e receba resposta direta, em 
 
 ## Visão geral
 
-O **Cipher** é uma interface de conversa com LLM, servida por um backend Express enxuto. O front é HTML/CSS/JS puro, sem framework nem build: uma SPA de tela única com identidade visual própria — esfera holográfica animada em canvas, partículas de fundo e painel de status do provedor.
+Backend Express enxuto + SPA em HTML/CSS/JS puro, sem framework e sem build.
+Não há banco de dados, cadastro nem estado de conversa no servidor.
 
-Sem banco de dados, sem cadastro, sem estado no servidor. O histórico da conversa vive no `localStorage` do navegador (validade de 24h) e vai junto em cada requisição, o que dá continuidade ao diálogo sem persistir nada fora da máquina do usuário.
+O único provedor é o **modelo local** servido por `llama-server` (llama.cpp),
+falado pelo protocolo OpenAI. **Não existe fallback de nuvem**, e isso é
+proposital: sem o modelo de pé o chat responde 503 com mensagem clara, em vez de
+mandar a sua pergunta para fora. Provedores de nuvem foram removidos por decisão
+de privacidade em agosto de 2026.
 
-## Funcionalidades
+## O que ele faz
 
-- **Chat com LLM** via Groq, com histórico de contexto das últimas 20 trocas
-- **Groq em cascata**: até 3 chaves/modelos, com fallback automático quando uma falha
-- **Markdown nas respostas**: títulos, listas, blocos de código, negrito e itálico
-- **Conversa restaurável**: recarregar a página não perde o diálogo (24h de validade)
-- **Botão de copiar** em cada resposta
-- **Rate limit** de 30 mensagens por minuto por IP
-- **Status do provedor** em tempo real no painel lateral, com latência e uptime da sessão
-
-## Arquitetura
-
-```
-┌──────────────────────────┐    POST /api/chat     ┌────────────────────────────┐
-│  SPA (HTML/CSS/JS puro)  │ ────────────────────▶ │  Backend Node.js/Express   │
-│  historico no            │                       │                            │
-│  localStorage            │ ◀──────────────────── │  ┌──────────────────────┐  │
-└──────────────────────────┘    resposta do LLM    │  │ agent                │  │
-                                                    │  │ system prompt +      │  │
-                                                    │  │ roteamento           │  │
-                                                    │  └──────────┬───────────┘  │
-                                                    │  ┌──────────▼───────────┐  │
-                                                    │  │ providers/groq       │  │
-                                                    │  │ cascata de 3 chaves  │  │
-                                                    │  └──────────────────────┘  │
-                                                    └────────────────────────────┘
-```
-
-## Stack
-
-| Camada | Tecnologia |
+| Recurso | Como funciona |
 |---|---|
-| Backend | Node.js + Express |
-| LLM | Groq API |
-| Frontend | HTML/CSS/JS puro (sem build) |
-| Deploy | Vercel |
+| **Chat com streaming** | SSE token a token. Fechar a aba aborta a inferência, em vez de deixar o modelo gerando para ninguém |
+| **Memória persistente** | Fatos que valem em qualquer conversa, extraídos em segundo plano. Vivem no `localStorage`, teto de 60 |
+| **Modo documentos** | Busca BM25 offline em `.md` locais (vault, docs de projeto). Sem serviço externo, sem processo extra |
+| **Acesso a arquivos** | Cinco ferramentas via tool calling nativo, numa sandbox de pasta única |
+| **Índice automático** | Cada pasta da sandbox ganha um `CIPHER.md` com o que existe nela, regerado do disco |
+| **Conversas** | Só no navegador. O servidor recebe o histórico e esquece |
 
-## Como rodar localmente
+### O chat nunca executa ferramenta sozinho
+
+Quando o modelo propõe criar, editar ou apagar arquivo, o servidor **guarda a
+intenção** e devolve um id. Quem escreve é uma rota separada, chamada **depois
+do clique** no card. Sem id existente não há escrita.
+
+A sandbox é uma pasta única: caminho absoluto, `~` e `..` são recusados, symlink
+é checado no ancestral existente mais próximo (e não no alvo, que pode ainda não
+existir), há whitelist de extensão e teto de tamanho. `criar_arquivo` nunca
+sobrescreve em silêncio, `editar_arquivo` grava backup antes, e `apagar_arquivo`
+move para a Lixeira em vez de dar `unlink`.
+
+## Rodar localmente
+
+Precisa de **Node 20**, do runtime do llama.cpp (`brew install llama.cpp`) e de
+um GGUF instruct qualquer. Em máquina de 8 GB, um 3B quantizado (`q4_k_m`).
 
 ```bash
-git clone https://github.com/MathTrajan/Cipher-Chat-Assistente-Virtual-Inteligente.git
-cd Cipher-Chat-Assistente-Virtual-Inteligente/app/backend
-
-cp .env.example .env
-# preencha GROQ_API_KEY_1 no .env
-
+git clone https://github.com/MathTrajan/LLM-Local-Cipher.git
+cd LLM-Local-Cipher/app/backend
 npm install
-npm start
+cp .env.example .env    # aponte LOCAL_LLM_GGUF para o seu .gguf
 ```
 
-Acesse: **http://localhost:3000**
+São **dois processos**, e os dois morrem com o shell:
+
+```bash
+npm run modelo   # sobe o llama-server; obrigatório, senão todo chat é 503
+npm start        # noutro terminal
+```
+
+Acesse **http://localhost:3100**.
+
+> ⚠️ **3100, não 3000.** `http://localhost:<porta>` é uma *origin*: favicon,
+> cache e `localStorage` são compartilhados por qualquer projeto na mesma porta.
+> Rodar aqui numa porta já usada por outro projeto faz o navegador servir ícone
+> e assets do outro, e o sintoma parece bug de front.
+
+## Comandos
+
+Todos em `app/backend/`:
+
+```bash
+npm run modelo   # sobe o llama-server
+npm start        # produção
+npm run dev      # nodemon
+npm run indexar  # (re)gera o índice do modo documentos
+npm run testar   # 4 scripts de smoke test
+npm run senha    # gera o hash de senha, para quando o app fica exposto
+```
 
 ## Variáveis de ambiente
 
 | Variável | Obrigatória | Descrição |
 |---|---|---|
-| `GROQ_API_KEY_1` | Sim | Chave da API Groq |
-| `GROQ_MODEL_1` | Não | Modelo primário (padrão: `llama-3.3-70b-versatile`) |
-| `GROQ_API_KEY_2`, `GROQ_API_KEY_3` | Não | Chaves de fallback |
-| `PORT` | Não | Porta do servidor (padrão: `3000`) |
-| `ALLOWED_ORIGIN` | Não | Origem liberada no CORS (padrão: `*`) |
+| `LOCAL_LLM_GGUF` | Sim | Caminho do `.gguf` que o `npm run modelo` carrega |
+| `LOCAL_LLM_BASE_URL` | Não | Padrão `http://127.0.0.1:8080/v1` |
+| `LOCAL_LLM_TIMEOUT_MS` | Não | Padrão 120000. No streaming conta **inatividade entre tokens**, não a resposta inteira |
+| `RAG_FONTES` | Para o modo documentos | Pastas com `.md`, separadas por `:`. Aceita `~` |
+| `CIPHER_ARQUIVOS_RAIZ` | Não | Única pasta onde o modelo pode escrever. Padrão `~/Cipher-Arquivos` |
+| `PORT` | Não | **Use 3100** (o padrão do código é 3000) |
+| `ALLOWED_ORIGIN` | Não | CORS, padrão `*` |
 
-> Lista completa em `app/backend/.env.example`.
+Lista completa em `app/backend/.env.example`.
 
 ## Endpoints
 
 | Método | Endpoint | Descrição |
 |---|---|---|
-| `POST` | `/api/chat` | Envia mensagem e recebe a resposta do LLM |
-| `GET`  | `/api/health` | Status do provedor LLM |
-| `GET`  | `/api/info` | Versão e configuração de roteamento |
+| `POST` | `/api/chat/stream` | Mensagem, resposta em SSE. É a que o front usa |
+| `POST` | `/api/chat` | Mensagem, resposta completa em JSON |
+| `POST` | `/api/memoria/extrair` | Mensagem, fatos duráveis |
+| `POST` | `/api/arquivos/executar` | Executa uma proposta pelo id. **Único ponto que escreve em disco** |
+| `POST` | `/api/arquivos/cancelar` | Descarta a proposta |
+| `GET` | `/api/health` | Status do modelo local e do índice de documentos |
+| `GET` | `/api/info` | Versão |
+
+Qualquer outro caminho cai no fallback da SPA e devolve o `index.html`. Por isso
+rota inexistente responde **200 com HTML** em vez de 404.
+
+## Índice de documentos
+
+O índice do modo documentos é **derivado** do conteúdo local e fica fora do
+versionamento (`app/backend/data/`). Regerar é rodar `npm run indexar`.
 
 ---
 
 <div align="center">
 
-Desenvolvido por **Matheus Trajano** · [LinkedIn](https://www.linkedin.com/in/matheus-trajano-5179a7378/)
+Desenvolvido por **Matheus Trajano** · [LinkedIn](https://www.linkedin.com/in/matheus-trajano)
 
 </div>

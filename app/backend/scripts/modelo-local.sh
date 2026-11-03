@@ -2,9 +2,14 @@
 #
 # Sobe o llama-server com o modelo local do Cipher.
 #
-# Este processo e SEPARADO do servidor Node e morre quando o shell fecha —
-# mesma armadilha do odysseus-dev. Sem ele de pe, a estrategia "auto" cai para o
-# Groq (precisa de internet) e a estrategia "local" devolve 503.
+# Este processo e SEPARADO do servidor Node e morre quando o shell fecha,
+# mesma armadilha do odysseus-dev. Sem ele de pe, TODO chat responde 503.
+#
+# ⚠️ Este comentario dizia ate 2026-11-03 que sem o modelo a estrategia "auto"
+# "cai para o Groq". E falso desde 2026-08-18: os provedores de nuvem foram
+# removidos (codigo, dependencia e vars) e NAO existe fallback nenhum. A frase
+# sugeria uma rede de seguranca que nao esta la, o que e pior que nao dizer nada:
+# a ausencia de fallback e a decisao de privacidade, nao um bug a consertar.
 #
 set -euo pipefail
 

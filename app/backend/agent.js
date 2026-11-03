@@ -21,6 +21,35 @@ const perfil = require("./perfil");
 const MAX_FATOS_MEMORIA = 60;
 const MAX_TAMANHO_FATO = 240;
 
+/**
+ * Traduz a falha do provedor na mensagem que diz o que FAZER.
+ *
+ * ⚠️ Toda falha do provedor virava "O modelo local nao esta respondendo. Suba o
+ * llama-server", e isso mente numa das falhas mais comuns. Medido em
+ * 2026-11-03: o prompt chegou a 9.315 tokens contra um contexto de 8.192, o
+ * llama-server devolveu 400 `exceed_context_size_error` e o usuario leu que o
+ * modelo estava fora, com o modelo de pe respondendo em 19 ms. Mensagem errada
+ * manda consertar a coisa errada, que foi o tema do dia inteiro.
+ */
+function mensagemDaFalha(erro) {
+  const m = String(erro?.message || "");
+  if (/exceed_context_size|exceeds the available context size/i.test(m)) {
+    const n = m.match(/request \((\d+) tokens\)/);
+    const ctx = m.match(/context size \((\d+) tokens\)/);
+    return (
+      `A conversa ficou maior que o contexto do modelo` +
+      (n && ctx ? ` (${n[1]} tokens contra ${ctx[1]})` : "") +
+      `. O modelo está no ar; o pedido é que não cabe. ` +
+      `Comece uma conversa nova, ou peça sobre um arquivo menor. ` +
+      `Arquivo grande entra como especificação resumida, mas o histórico soma.`
+    );
+  }
+  if (/respondeu 4\d\d/.test(m)) {
+    return `O modelo recusou o pedido (${m.slice(0, 120)}). O modelo está no ar.`;
+  }
+  return ERRO_MODELO_FORA;
+}
+
 const ERRO_MODELO_FORA =
   "O modelo local não está respondendo. Suba o llama-server (npm run modelo) e tente de novo.";
 
@@ -482,6 +511,35 @@ function avisoDeArquivoNaoGerado(result, { forcar = false } = {}) {
  * do sistema; no stream ele precisa ir para a tela, porque o texto do modelo ja
  * foi enviado token a token e nao da para retirar.
  */
+/* Marcadores do bloco do manual dentro do system prompt. Ficam aqui e em
+   montarMensagens(); mudar um exige mudar o outro. */
+const MANUAL_INICIO = "\n\n=== COMO GERAR RELATORIO A2O (siga a risca) ===";
+const MANUAL_FIM = "=== fim do manual ===";
+
+/**
+ * Tira o manual do padrao do system prompt, no lugar.
+ *
+ * ⚠️ Isto nao e economia de token por elegancia: sem isto o pedido ESTOURA o
+ * contexto. Medido em 2026-11-03, com um .jrxml de 8,7 KB: depois do laco de
+ * leitura o prompt foi a 9.315 tokens contra os 8.192 do modelo, o
+ * llama-server devolveu 400 `exceed_context_size_error` e a conversa morreu
+ * dizendo que o modelo estava fora do ar.
+ * O manual tem ~2.400 tokens e, depois da leitura, e redundante: a
+ * especificacao do arquivo ja termina na secao "O que fazer", com a ferramenta
+ * e os argumentos preenchidos. Conhecimento generico sai; dado especifico fica.
+ */
+function descartarManual(messages, motivo) {
+  const sistema = messages[0];
+  if (sistema?.role !== "system" || !sistema.content?.includes(MANUAL_INICIO)) return false;
+  const i = sistema.content.indexOf(MANUAL_INICIO);
+  const f = sistema.content.indexOf(MANUAL_FIM, i);
+  if (f === -1) return false;
+  const antes = sistema.content.length;
+  sistema.content = sistema.content.slice(0, i) + sistema.content.slice(f + MANUAL_FIM.length);
+  console.log(`[Cipher] manual do padrao fora do prompt (${antes - sistema.content.length} chars): ${motivo}`);
+  return true;
+}
+
 async function resolverConversa(chamar, messages, { forcar = false, rotulo = "", aoAvisar = null } = {}) {
   let result = await chamar(messages, {});
 
@@ -515,6 +573,7 @@ async function resolverConversa(chamar, messages, { forcar = false, rotulo = "",
 
     messages.push({ role: "assistant", content: result.text || "" });
     messages.push(mensagemDeLeitura(leituras));
+    descartarManual(messages, "a leitura entrou no contexto");
     result = await chamar(messages, {});
   }
 
@@ -615,7 +674,7 @@ async function processMessage(userMessage, conversationHistory = [], options = {
   } catch (erro) {
     if (erro.name === "AgentError") throw erro;
     console.error("[Cipher] ✗ Falha no modelo local:", erro.message);
-    throw new AgentError(ERRO_MODELO_FORA, {
+    throw new AgentError(mensagemDaFalha(erro), {
       primaryError: erro.message,
       totalLatencyMs: Date.now() - startTime,
     });
@@ -673,7 +732,7 @@ async function processMessageStream(userMessage, conversationHistory = [], optio
   } catch (erro) {
     console.error("[Cipher] ✗ Falha no stream local:", erro.message);
     throw new AgentError(
-      emitiu ? "A resposta foi interrompida no meio." : ERRO_MODELO_FORA,
+      emitiu ? "A resposta foi interrompida no meio." : mensagemDaFalha(erro),
       { primaryError: erro.message, parcial: emitiu, totalLatencyMs: Date.now() - startTime }
     );
   }

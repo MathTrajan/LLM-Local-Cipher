@@ -32,7 +32,6 @@ app/graphify-out/
 preview.html
 *.log
 
-.vercel
 
 # Indice do modo documentos (RAG) — derivado do vault, nunca versionar
 app/backend/data/
