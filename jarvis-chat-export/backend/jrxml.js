@@ -476,6 +476,15 @@ function resumir(conteudo, { limiteTextos = 40, limiteExpr = 30, tetoTokens = 26
 function instrucaoDeUso(xml, caminho) {
   const { tipo, sinais } = classificarLayout(xml);
   const origem = caminho ? `"${caminho}"` : "o caminho do arquivo que voce leu";
+  /* ⚠️ O nome de saida vai MASCADO, nao como regra a interpretar. Dizer "use um
+     nome diferente do original" nao funcionou: em 2026-11-03 o modelo pediu
+     saida com o nome do proprio arquivo de origem e o .jrxml de 28 KB do
+     cliente foi sobrescrito por 11 KB gerados. A guarda no montador agora
+     recusa isso, mas recusa custa uma inferencia inteira; entregar o nome
+     pronto acerta na primeira. */
+  const sugestao = caminho
+    ? `"${String(caminho).replace(/\.jrxml$/i, "")}-a2o.jrxml"`
+    : '"<nome-do-original>-a2o.jrxml"';
 
   if (tipo === "ficha") {
     return (
@@ -504,8 +513,10 @@ function instrucaoDeUso(xml, caminho) {
       /* Sem travessao: o modelo copia o texto da instrucao para a resposta, e a
          resposta e frase visivel ao usuario. */
       `- herdarDe: ${origem}. O contrato sai dele, nao liste campos a mao.\n` +
-      `- colunas: so as que o pedido exige, teto de 14 (acima de 8 vira paisagem).\n` +
-      `- caminho: nome de saida DIFERENTE do original.\n` +
+      `- saida: ${sugestao}. Nunca o nome do original: gravar ali destroi o ` +
+      `arquivo que o usuario enviou, e o montador recusa.\n` +
+      `- colunas: so as que o pedido exige, de 2 a 14 (acima de 8 vira paisagem). ` +
+      `Uma coluna so e recusado: tabela de uma coluna nao mostra nada.\n` +
       `Os ${sinais.campos} campos listados acima sao o dataset inteiro, NAO ` +
       `${sinais.campos} colunas.`
     );

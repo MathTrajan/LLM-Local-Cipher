@@ -383,6 +383,93 @@ const PEDIDOS_QUE_NAO_DEVEM_FORCAR = [
       avisado.length === 1 && /Aviso do sistema/.test(avisado[0]));
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // 6. Guardas de gravacao do montador
+  // ─────────────────────────────────────────────────────────────
+  console.log("\nGuardas de gravacao (gerar_relatorio_a2o)");
+
+  const fs = require("fs");
+  const RAIZ = process.env.JARVIS_ARQUIVOS_RAIZ;
+
+  /* Entra pelo `executarFerramenta`, que e o caminho que a rota usa, e nao pela
+     funcao interna: guarda que so vale chamando direto nao protege nada. */
+  async function gerar(spec) {
+    try {
+      const r = await arquivos.executarFerramenta("gerar_relatorio_a2o", spec);
+      return { codigo: "OK", r };
+    } catch (erro) {
+      return { codigo: erro.codigo || erro.code || erro.name, mensagem: erro.message };
+    }
+  }
+
+  const CONTRATO = Array.from({ length: 20 }, (_, i) => ({
+    nome: `campo${i}`, classe: "java.lang.String",
+  }));
+  const COLUNAS_OK = [
+    { titulo: "Remetente", campo: "campo0" },
+    { titulo: "Tomador", campo: "campo1" },
+    { titulo: "Valor", campo: "campo2" },
+  ];
+
+  {
+    /* ⚠️ O caso que destruiu o arquivo de um cliente em 2026-11-03: a saida leva
+       o nome de um .jrxml que o usuario enviou. Sem `herdarDe` explicito, a
+       checagem de nomes nao roda e so esta guarda segura. */
+    fs.writeFileSync(path.join(RAIZ, "origem-do-usuario.jrxml"),
+      '<?xml version="1.0"?>\n<jasperReport name="origem"><field name="campo0" class="java.lang.String"/></jasperReport>');
+    const res = await gerar({
+      saida: "origem-do-usuario.jrxml", nome: "x", campos: CONTRATO, colunas: COLUNAS_OK,
+    });
+    checar("recusa gravar sobre .jrxml que o montador nao gerou",
+      res.codigo === "SOBRESCREVERIA_ORIGEM", `veio ${res.codigo}: ${res.mensagem || ""}`);
+    checar("a recusa sugere um nome concreto",
+      /origem-do-usuario-a2o\.jrxml/.test(res.mensagem || ""), res.mensagem);
+    checar("o arquivo de origem continua intacto",
+      fs.readFileSync(path.join(RAIZ, "origem-do-usuario.jrxml"), "utf8").includes('name="origem"'));
+  }
+  {
+    // Saida nova: grava normalmente e devolve o caminho para o botao de baixar.
+    const res = await gerar({
+      saida: "origem-do-usuario-a2o.jrxml", nome: "x", campos: CONTRATO, colunas: COLUNAS_OK,
+    });
+    checar("saida com nome novo grava", res.codigo === "OK", `${res.codigo}: ${res.mensagem || ""}`);
+    checar("o resultado traz caminho, colunas e campos (o card mostra isso)",
+      res.r && res.r.caminho && res.r.colunas === 3 && res.r.campos === 20,
+      JSON.stringify(res.r));
+
+    // Regerar POR CIMA da propria saida e permitido: tem o marcador.
+    const denovo = await gerar({
+      saida: "origem-do-usuario-a2o.jrxml", nome: "x", campos: CONTRATO, colunas: COLUNAS_OK,
+    });
+    checar("regerar sobre a propria saida e permitido", denovo.codigo === "OK",
+      `${denovo.codigo}: ${denovo.mensagem || ""}`);
+  }
+  {
+    /* Piso de colunas: 1 coluna num contrato largo foi o que saiu no pedido do
+       cliente, e o arquivo era valido e inutil. */
+    const res = await gerar({
+      saida: "uma-coluna-a2o.jrxml", nome: "x", campos: CONTRATO,
+      colunas: [{ titulo: "Remetente", campo: "campo0" }],
+    });
+    checar("recusa 1 coluna num contrato de 20 campos",
+      res.codigo === "COLUNAS_DE_MENOS", `veio ${res.codigo}`);
+
+    // Contrato estreito continua podendo ter 1 coluna.
+    const estreito = await gerar({
+      saida: "estreito-a2o.jrxml", nome: "x",
+      campos: [{ nome: "campo0", classe: "java.lang.String" }],
+      colunas: [{ titulo: "Unica", campo: "campo0" }],
+    });
+    checar("contrato de 1 campo ainda pode ter 1 coluna", estreito.codigo === "OK",
+      `${estreito.codigo}: ${estreito.mensagem || ""}`);
+  }
+  {
+    const res = await gerar({
+      saida: "sem-colunas-a2o.jrxml", nome: "x", campos: CONTRATO, colunas: [],
+    });
+    checar("sem coluna nenhuma continua recusado", res.codigo === "SEM_COLUNAS");
+  }
+
   console.log(`\nRESULTADO: ${ok} ok, ${falhas} falha(s)`);
   process.exit(falhas ? 1 : 0);
 })();

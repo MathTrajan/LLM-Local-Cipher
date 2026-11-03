@@ -915,15 +915,26 @@ function descreverResultado(data) {
     case "apagar_arquivo": return `${r.caminho} foi para a Lixeira${sufixoIndice(r)}`;
     case "ler_arquivo":    return `Lido: ${r.caminho}`;
     case "listar_pasta":   return `${r.total} item(ns) em ${r.caminho}`;
+    /* ⚠️ Sem este caso a geração caía no `default` e o card dizia só "Feito.",
+       escondendo o que mais importa conferir: quantas colunas e quantos campos
+       saíram. Em 2026-11-03 um arquivo saiu com 1 coluna e 59 campos de um
+       original de 75, e "Feito." não deu nenhuma pista. */
+    case "gerar_relatorio_a2o":
+      return `Gerado: ${r.caminho} (${r.colunas} coluna(s), ${r.campos} campo(s), ` +
+             `${Math.round((r.bytes || 0) / 1024)} KB)${sufixoIndice(r)}`;
     default:               return "Feito.";
   }
 }
 
-/** Leitura e listagem devolvem conteudo, que vale a pena mostrar na hora. */
+/**
+ * Completa o card depois da execução: saída de leitura, aviso do servidor e o
+ * botão de baixar.
+ */
 function mostrarSaidaDaAcao(card, data) {
   const r = data.resultado || {};
-  let texto = null;
 
+  // Leitura e listagem devolvem conteudo, que vale a pena mostrar na hora.
+  let texto = null;
   if (data.ferramenta === "ler_arquivo") {
     texto = r.conteudo + (r.truncado ? "\n\n[...] arquivo cortado na exibição." : "");
   } else if (data.ferramenta === "listar_pasta") {
@@ -931,17 +942,34 @@ function mostrarSaidaDaAcao(card, data) {
       ? r.itens.map((i) => (i.tipo === "pasta" ? `${i.nome}/` : i.nome)).join("\n")
       : "Pasta vazia.";
   }
-  if (texto === null) return;
+  if (texto !== null) {
+    const pre = document.createElement("pre");
+    pre.className = "acao-saida";
+    pre.textContent = texto;
+    card.appendChild(pre);
+  }
 
-  const pre = document.createElement("pre");
-  pre.className = "acao-saida";
-  pre.textContent = texto;
-  card.appendChild(pre);
+  /* Aviso que o servidor anexa ao resultado, como o palpite de `herdarDe`. Ele
+     existia no payload e nunca era exibido: o usuário não tinha como desmentir
+     um palpite que não via. */
+  if (r.aviso) {
+    const nota = document.createElement("p");
+    nota.className = "acao-aviso";
+    nota.textContent = r.aviso;
+    card.appendChild(nota);
+  }
 
   /* Botao de baixar, quando a acao produziu um arquivo. E o fim do fluxo
-     "envio um .jrxml, recebo outro pronto": sem ele o arquivo gerado ficaria
-     so na sandbox do servidor, inalcancavel pelo navegador. */
-  if (r && r.caminho && /\.(jrxml|xml|md|txt|csv|json|py|sql)$/i.test(r.caminho)) {
+     "envio um .jrxml, recebo outro pronto": sem ele o arquivo gerado fica
+     so na sandbox do servidor, inalcancavel pelo navegador.
+
+     ⚠️ Isto ficava DEPOIS de um `if (texto === null) return`, e `texto` só é
+     preenchido por `ler_arquivo` e `listar_pasta`. Ou seja: o botão existia no
+     código e era inalcançável exatamente no caso que o justifica. Medido em
+     2026-11-03 com o usuário pedindo "gere o arquivo" e o card respondendo
+     "Feito." sem nada para clicar. Não volte a amarrar o botão à saída de
+     texto: são coisas independentes. */
+  if (r.caminho && /\.(jrxml|xml|md|txt|csv|json|py|sql)$/i.test(r.caminho)) {
     const baixar = document.createElement("a");
     baixar.className = "acao-btn confirmar acao-baixar";
     baixar.href = `${API_BASE}/api/arquivos/baixar?caminho=${encodeURIComponent(r.caminho)}`;

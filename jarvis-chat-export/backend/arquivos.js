@@ -641,6 +641,22 @@ async function gerarRelatorioA2O(spec = {}) {
     spec = { ...spec, paisagem: true };
   }
 
+  /* ⚠️ PISO de colunas, irmao do teto acima e pela mesma razao: layout que nao
+     serve. Medido em 2026-11-03: o modelo mandou UMA coluna para um relatorio
+     cujo contrato tem 59 campos, e o arquivo saiu valido e inutil (uma tabela
+     de uma coluna nao e listagem de nada).
+     O piso vale so quando o contrato e largo: relatorio de 3 campos pode
+     legitimamente ter 1 ou 2 colunas. Com 10 campos ou mais, uma coluna so e
+     omissao, nao escolha. */
+  if (spec.colunas.length < 2 && (spec.campos || []).length >= 10) {
+    throw new ErroArquivo(
+      `Uma coluna so, num contrato de ${spec.campos.length} campos: isso gera uma ` +
+        `tabela que nao mostra nada. Escolha as colunas que o pedido exige ` +
+        `(titulo e campo de cada uma), no maximo 14.`,
+      "COLUNAS_DE_MENOS"
+    );
+  }
+
   /* ⚠️ Ultimo recurso: herdar do .jrxml mais recente da sandbox.
      O modelo esquece `herdarDe` com frequencia (medido em 2026-11-01: acertou
      numa chamada e esqueceu na seguinte, com o mesmo pedido). Quando isso
@@ -715,6 +731,32 @@ async function gerarRelatorioA2O(spec = {}) {
   jrxml.validar(xml, { padraoA2O: true });
 
   const alvo = resolverSeguro(saida);
+
+  /* ⚠️ Guarda GERAL: nunca gravar sobre um .jrxml que o montador NAO produziu.
+     A checagem `SAIDA_IGUAL_ORIGEM` lá em cima só vale quando `herdarDe` vem
+     explícito, e foi por essa fresta que o arquivo de um cliente foi destruido
+     em 2026-11-03: o modelo OMITIU `herdarDe`, o contrato entrou pelo palpite,
+     a comparacao de nomes nunca rodou e a saida levou o nome do original. Os
+     28 KB enviados viraram 11 KB gerados; só o `.backups/` salvou.
+     A pergunta certa nao e "de onde veio o contrato" e sim "o que existe nesse
+     caminho". Arquivo com o marcador e saida nossa e pode ser regerado;
+     qualquer outro e material do usuario. */
+  try {
+    const existente = (await fsp.readFile(alvo, "utf8")).slice(0, 4000);
+    if (!existente.includes("jarvis-montador-a2o")) {
+      const base = path.basename(saida).replace(/\.jrxml$/i, "");
+      throw new ErroArquivo(
+        `"${relativo(alvo)}" ja existe e NAO foi gerado pelo montador: e o arquivo ` +
+          `de origem. Gravar ali destruiria o original. Use outro nome, por ` +
+          `exemplo "${base}-a2o.jrxml".`,
+        "SOBRESCREVERIA_ORIGEM"
+      );
+    }
+  } catch (erro) {
+    if (erro.name === "ErroArquivo") throw erro;
+    // ENOENT e o caso normal: alvo novo.
+  }
+
   await fsp.mkdir(path.dirname(alvo), { recursive: true });
   await fsp.writeFile(alvo, xml, "utf8");
   return {

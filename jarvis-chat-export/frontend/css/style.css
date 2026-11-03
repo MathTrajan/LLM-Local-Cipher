@@ -514,6 +514,9 @@ body {
 .acao-btn.cancelar:hover { background: var(--elev); color: var(--tx); }
 .acao-saida { margin-top: 10px; font-size: 12.5px; color: var(--ok); font-family: var(--mono); word-break: break-word; }
 .acao-erro  { margin-top: 10px; font-size: 12.5px; color: var(--erro); font-family: var(--mono); }
+/* Aviso do servidor no card, como o palpite de contrato herdado. Nao e erro:
+   e informacao que o usuario precisa poder desmentir. */
+.acao-aviso { margin-top: 10px; font-size: 12.5px; line-height: 1.45; color: var(--tx2); }
 
 /* ─── Indicador de digitacao ─── */
 .typing-indicator {
